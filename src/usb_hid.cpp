@@ -4,10 +4,10 @@
 #include "USBHID.h"
 
 // ---------------------------------------------------------------------------
-// Official Sony PlayStation 3 DualShock 3 HID Report Descriptor (176 Bytes)
-// Includes genuine PS3 report format (Report 0x01: 49 bytes, Output: 48 bytes)
-// plus Feature Reports 0xF2 (17 bytes: Bluetooth MAC) and 0xF5 (8 bytes: operational mode)
-// to satisfy Linux kernel hid-sony driver and the PS3 console handshake.
+// Official Sony PlayStation 3 DualShock 3 HID Report Descriptor
+// Includes genuine PS3 report format (Report 0x01: 49 bytes input, 48 bytes output/feature)
+// plus Feature Reports 0x02, 0xEE, 0xEF, 0xF1, 0xF2, 0xF4, 0xF5, 0xF7, 0xF8
+// to satisfy both the Linux kernel hid-sony driver and physical PS3 console handshakes.
 // ---------------------------------------------------------------------------
 static const uint8_t s_sony_ds3_report_descriptor[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
@@ -85,16 +85,44 @@ static const uint8_t s_sony_ds3_report_descriptor[] = {
     0xb1, 0x02,        //     Feature (Data,Var,Abs)
     0xc0,              //   End Collection
     0xa1, 0x02,        //   Collection (Logical)
+    0x85, 0xf1,        //     Report ID (241 = 0xF1)
+    0x75, 0x08,        //     Report Size (8)
+    0x95, 0x40,        //     Report Count (64 bytes)
+    0x09, 0x01,        //     Usage (Pointer)
+    0xb1, 0x02,        //     Feature (Data,Var,Abs)
+    0xc0,              //   End Collection
+    0xa1, 0x02,        //   Collection (Logical)
     0x85, 0xf2,        //     Report ID (242 = 0xF2)
     0x75, 0x08,        //     Report Size (8)
-    0x95, 0x11,        //     Report Count (17 bytes)
+    0x95, 0x40,        //     Report Count (64 bytes)
+    0x09, 0x01,        //     Usage (Pointer)
+    0xb1, 0x02,        //     Feature (Data,Var,Abs)
+    0xc0,              //   End Collection
+    0xa1, 0x02,        //   Collection (Logical)
+    0x85, 0xf4,        //     Report ID (244 = 0xF4)
+    0x75, 0x08,        //     Report Size (8)
+    0x95, 0x04,        //     Report Count (4 bytes)
     0x09, 0x01,        //     Usage (Pointer)
     0xb1, 0x02,        //     Feature (Data,Var,Abs)
     0xc0,              //   End Collection
     0xa1, 0x02,        //   Collection (Logical)
     0x85, 0xf5,        //     Report ID (245 = 0xF5)
     0x75, 0x08,        //     Report Size (8)
-    0x95, 0x08,        //     Report Count (8 bytes)
+    0x95, 0x40,        //     Report Count (64 bytes)
+    0x09, 0x01,        //     Usage (Pointer)
+    0xb1, 0x02,        //     Feature (Data,Var,Abs)
+    0xc0,              //   End Collection
+    0xa1, 0x02,        //   Collection (Logical)
+    0x85, 0xf7,        //     Report ID (247 = 0xF7)
+    0x75, 0x08,        //     Report Size (8)
+    0x95, 0x40,        //     Report Count (64 bytes)
+    0x09, 0x01,        //     Usage (Pointer)
+    0xb1, 0x02,        //     Feature (Data,Var,Abs)
+    0xc0,              //   End Collection
+    0xa1, 0x02,        //   Collection (Logical)
+    0x85, 0xf8,        //     Report ID (248 = 0xF8)
+    0x75, 0x08,        //     Report Size (8)
+    0x95, 0x40,        //     Report Count (64 bytes)
     0x09, 0x01,        //     Usage (Pointer)
     0xb1, 0x02,        //     Feature (Data,Var,Abs)
     0xc0,              //   End Collection
@@ -102,6 +130,57 @@ static const uint8_t s_sony_ds3_report_descriptor[] = {
 };
 
 static_assert(sizeof(PS3NativeInputReport) == 48, "PS3NativeInputReport must be exactly 48 bytes");
+
+// ---------------------------------------------------------------------------
+// Captured Authentic DualShock 3 Handshake Response Data
+// Direct byte captures from a genuine PS3 console handshake session
+// ---------------------------------------------------------------------------
+static const uint8_t s_ds3_resp_0x01[64] = {
+    0x00, 0x01, 0x04, 0x00, 0x08, 0x0C, 0x01, 0x02, 0x18, 0x18, 0x18, 0x18, 0x09, 0x0A, 0x10, 0x11,
+    0x12, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x04,
+    0x04, 0x04, 0x04, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x07, 0x00, 0x17, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ds3_resp_0xF2[64] = {
+    0xF2, 0xFF, 0xFF, 0x00, 0x34, 0xC7, 0x31, 0x28, 0xE8, 0x9E, 0x00, 0x03, 0x50, 0x81, 0xD8, 0x01,
+    0x8A, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x04,
+    0x04, 0x04, 0x04, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x07, 0x00, 0x17, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ds3_resp_0xF5_template[64] = {
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x9E, 0x00, 0x03, 0x50, 0x81, 0xD8, 0x01,
+    0x8A, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x04,
+    0x04, 0x04, 0x04, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x07, 0x00, 0x17, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ds3_resp_0xEF[64] = {
+    0x00, 0xEF, 0x04, 0x00, 0x08, 0x03, 0x01, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0xFE, 0x01, 0x8B, 0x02, 0x00, 0x01, 0x8F, 0x02, 0x00, 0x01, 0x8D, 0x01, 0xF4, 0x00,
+    0x7D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ds3_resp_0xF8[64] = {
+    0x00, 0x01, 0x00, 0x00, 0x08, 0x03, 0x01, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x6A, 0x02, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ds3_resp_0xF7[64] = {
+    0x01, 0x00, 0xFE, 0x02, 0xCE, 0x01, 0xEE, 0xFF, 0x10, 0x12, 0x00, 0x02, 0xFE, 0x01, 0xCE, 0x00,
+    0x00, 0x02, 0x02, 0x02, 0x00, 0x03, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x62, 0x01, 0x02, 0x01,
+    0x5E, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static uint8_t s_hostMac[6] = {0};
+static bool s_hasHostMac = false;
+static bool s_paired = false;
+static bool s_streamingActive = false;
 
 class PS3USBHIDDevice : public USBHIDDevice {
 public:
@@ -113,27 +192,51 @@ public:
     }
 
     uint16_t _onGetFeature(uint8_t report_id, uint8_t* buffer, uint16_t reqlen) override {
-        Serial.printf("[USB HID] Get Feature Report: ID 0x%02X, req len %u\n", report_id, reqlen);
-        if (report_id == 0xF2) {
-            uint16_t copy_len = (reqlen < 17) ? reqlen : 17;
-            memset(buffer, 0, copy_len);
-            buffer[0] = 0xF2;
-            // Simulated Bluetooth MAC Address at bytes 4..9 (00:1A:80:AA:BB:CC)
-            buffer[4] = 0x00;
-            buffer[5] = 0x1A;
-            buffer[6] = 0x80;
-            buffer[7] = 0xAA;
-            buffer[8] = 0xBB;
-            buffer[9] = 0xCC;
+        Serial.printf("[USB HID] GET_REPORT (Feature): ID 0x%02X, req len %u\n", report_id, reqlen);
+
+        const uint8_t* src = nullptr;
+        uint16_t src_len = 0;
+
+        switch (report_id) {
+            case 0x01:
+                src = s_ds3_resp_0x01;
+                src_len = sizeof(s_ds3_resp_0x01);
+                break;
+            case 0xF2:
+                src = s_ds3_resp_0xF2;
+                src_len = sizeof(s_ds3_resp_0xF2);
+                break;
+            case 0xF5: {
+                uint16_t copy_len = (reqlen < sizeof(s_ds3_resp_0xF5_template)) ? reqlen : sizeof(s_ds3_resp_0xF5_template);
+                memcpy(buffer, s_ds3_resp_0xF5_template, copy_len);
+                if (s_hasHostMac && copy_len >= 8) {
+                    memcpy(&buffer[2], s_hostMac, 6);
+                }
+                return copy_len;
+            }
+            case 0xEF:
+                src = s_ds3_resp_0xEF;
+                src_len = sizeof(s_ds3_resp_0xEF);
+                break;
+            case 0xF8:
+                src = s_ds3_resp_0xF8;
+                src_len = sizeof(s_ds3_resp_0xF8);
+                break;
+            case 0xF7:
+                src = s_ds3_resp_0xF7;
+                src_len = sizeof(s_ds3_resp_0xF7);
+                break;
+            default:
+                break;
+        }
+
+        if (src && src_len > 0) {
+            uint16_t copy_len = (reqlen < src_len) ? reqlen : src_len;
+            memcpy(buffer, src, copy_len);
             return copy_len;
         }
-        if (report_id == 0xF5) {
-            uint16_t copy_len = (reqlen < 8) ? reqlen : 8;
-            memset(buffer, 0, copy_len);
-            buffer[0] = 0xF5;
-            return copy_len;
-        }
-        // Respond to ANY requested report ID with valid payload so TinyUSB never stalls
+
+        // Fallback: respond cleanly so TinyUSB never stalls
         if (reqlen > 0) {
             memset(buffer, 0, reqlen);
             buffer[0] = report_id;
@@ -143,11 +246,48 @@ public:
     }
 
     void _onSetFeature(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        Serial.printf("[USB HID] Set Feature Report: ID 0x%02X, len %u\n", report_id, len);
+        Serial.printf("[USB HID] SET_REPORT (Feature): ID 0x%02X, len %u\n", report_id, len);
+
+        if (report_id == 0xF4) {
+            if (len >= 2) {
+                Serial.printf("[USB HID] F4 Controller Command: 0x%02X 0x%02X\n", buffer[0], buffer[1]);
+                if (buffer[0] == 0x42 && (buffer[1] == 0x02 || buffer[1] == 0x0C)) {
+                    s_streamingActive = true;
+                    s_paired = true;
+                    Serial.println("[USB HID] *** PS3 ACTIVATED CONTROLLER (F4 Enable Streaming) ***");
+                }
+            }
+        } else if (report_id == 0xF5) {
+            if (len >= 8) {
+                memcpy(s_hostMac, &buffer[2], 6);
+                s_hasHostMac = true;
+                Serial.printf("[USB HID] PS3 Paired Host MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                              s_hostMac[0], s_hostMac[1], s_hostMac[2],
+                              s_hostMac[3], s_hostMac[4], s_hostMac[5]);
+            }
+        } else if (report_id == 0x01) {
+            handleOutputReport(buffer, len);
+        }
     }
 
     void _onOutput(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        Serial.printf("[USB HID] Output Report: ID 0x%02X, len %u\n", report_id, len);
+        Serial.printf("[USB HID] SET_REPORT (Output): ID 0x%02X, len %u\n", report_id, len);
+        if (report_id == 0x01 || report_id == 0x00) {
+            handleOutputReport(buffer, len);
+        }
+    }
+
+private:
+    void handleOutputReport(const uint8_t* buffer, uint16_t len) {
+        if (len >= 10) {
+            uint8_t led_field = buffer[9];
+            uint8_t leds = (led_field >> 1) & 0x0F;
+            if (leds != 0) {
+                s_paired = true;
+                int player = (leds & 1) ? 1 : ((leds & 2) ? 2 : ((leds & 4) ? 3 : 4));
+                Serial.printf("[USB HID] *** PS3 ASSIGNED PLAYER %d (LED field 0x%02X) ***\n", player, led_field);
+            }
+        }
     }
 };
 
@@ -172,7 +312,7 @@ bool usb_hid_init() {
     USB.usbClass(0);                      // bDeviceClass = 0 (Defined at interface level)
     USB.usbSubClass(0);                   // bDeviceSubClass = 0
     USB.usbProtocol(0);                   // bDeviceProtocol = 0
-    USB.usbAttributes(0x80);              // bmAttributes = 0x80 (Bus Powered, NOT Self-Powered)
+    USB.usbAttributes(0x80);              // bmAttributes = 0x80 (Bus Powered)
     USB.webUSB(false);                    // Disable WebUSB to prevent BOS descriptors
 
     if (!s_hid.addDevice(&s_device, sizeof(s_sony_ds3_report_descriptor))) {
@@ -194,12 +334,15 @@ bool usb_hid_ready() {
     return s_initialized && ((bool)USB);
 }
 
+bool usb_hid_is_paired() {
+    return s_paired || s_streamingActive;
+}
+
 bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry, uint8_t hat, uint32_t buttons) {
     if (!s_initialized || !((bool)USB)) {
         return false;
     }
 
-    // Avoid blocking or queueing when endpoint is still busy with previous report
     if (!s_hid.ready()) {
         return false;
     }
@@ -265,16 +408,128 @@ bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry,
     if (rep.press_l2 > 20) rep.buttons2 |= (1 << 0);
     if (rep.press_r2 > 20) rep.buttons2 |= (1 << 1);
 
-    // Battery status (0xEE = charging / 100%) and Connection (0x02 = USB)
-    rep.charge = 0xEE;
-    rep.connection = 0x02;
+    // Standard Authentic Status values matching captured PS3 packet #53
+    rep.connection = 0x02; // USB
+    rep.charge     = 0xEE; // 100% full / charging
+    rep.status     = 0x12; // PS3_WIRED_NO_RUMBLE
+    rep.unk4[4]    = 0x12;
+    rep.unk4[5]    = 0xA2;
+    rep.unk4[6]    = 0x77;
 
-    // Neutral Accelerometer values (512 = 0x0200)
-    rep.accel_x = 512;
-    rep.accel_y = 512;
-    rep.accel_z = 512;
-    rep.gyro_z  = 512;
+    // Authentic Sixaxis sensor center values
+    rep.accel_x_hi = 0x01; rep.accel_x_lo = 0xC0; // 448
+    rep.accel_y_hi = 0x01; rep.accel_y_lo = 0xFE; // 510
+    rep.accel_z_hi = 0x01; rep.accel_z_lo = 0xEA; // 490
+    rep.gyro_z_hi  = 0x01; rep.gyro_z_lo  = 0x8D; // 397
+    rep.reserved[0] = 0x00;
+    rep.reserved[1] = 0x02;
 
     // Send 48 bytes with Report ID 0x01 (TinyUSB prepends ID making 49 bytes on wire)
-    return s_hid.SendReport(0x01, &rep, sizeof(rep), 10);
+    return s_hid.SendReport(0x01, &rep, sizeof(rep), 25);
 }
+
+// ---------------------------------------------------------------------------
+// Authentic PlayStation 3 DualShock 3 Configuration Descriptor (41 Bytes)
+// Direct capture from genuine Sony controller:
+// Interface 0: HID, SubClass 0, Protocol 0, iInterface 0, wDescriptorLength 148 (0x94)
+// Endpoint 0x02 OUT (Interrupt, 64 bytes, 1ms)
+// Endpoint 0x81 IN  (Interrupt, 64 bytes, 1ms)
+// ---------------------------------------------------------------------------
+static const uint8_t s_genuine_ds3_config_descriptor[] = {
+    0x09,        // bLength
+    0x02,        // bDescriptorType (Configuration)
+    0x29, 0x00,  // wTotalLength: 41 bytes
+    0x01,        // bNumInterfaces: 1
+    0x01,        // bConfigurationValue: 1
+    0x00,        // iConfiguration: 0
+    0x80,        // bmAttributes: 0x80 (Bus Powered)
+    0xFA,        // bMaxPower: 500mA
+
+    0x09,        // bLength
+    0x04,        // bDescriptorType (Interface)
+    0x00,        // bInterfaceNumber: 0
+    0x00,        // bAlternateSetting: 0
+    0x02,        // bNumEndpoints: 2
+    0x03,        // bInterfaceClass: 3 (HID)
+    0x00,        // bInterfaceSubClass: 0
+    0x00,        // bInterfaceProtocol: 0
+    0x00,        // iInterface: 0 (No string)
+
+    0x09,        // bLength
+    0x21,        // bDescriptorType (HID)
+    0x11, 0x01,  // bcdHID: 1.17
+    0x00,        // bCountryCode: 0
+    0x01,        // bNumDescriptors: 1
+    0x22,        // bDescriptorType[0]: 0x22 (HID Report)
+    0x94, 0x00,  // wDescriptorLength[0]: 148 bytes (0x0094)
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x02,        // bEndpointAddress: 0x02 (OUT)
+    0x03,        // bmAttributes: 0x03 (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize: 64 bytes
+    0x01,        // bInterval: 1ms
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x81,        // bEndpointAddress: 0x81 (IN)
+    0x03,        // bmAttributes: 0x03 (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize: 64 bytes
+    0x01         // bInterval: 1ms
+};
+
+// ---------------------------------------------------------------------------
+// Authentic PlayStation 3 DualShock 3 Device Descriptor (18 Bytes)
+// ---------------------------------------------------------------------------
+static const uint8_t s_genuine_ds3_device_descriptor[] = {
+    0x12,        // bLength: 18
+    0x01,        // bDescriptorType: Device
+    0x00, 0x02,  // bcdUSB: 2.00
+    0x00,        // bDeviceClass: 0
+    0x00,        // bDeviceSubClass: 0
+    0x00,        // bDeviceProtocol: 0
+    0x40,        // bMaxPacketSize0: 64
+    0x4C, 0x05,  // idVendor: 0x054C (Sony)
+    0x68, 0x02,  // idProduct: 0x0268 (DualShock 3)
+    0x00, 0x01,  // bcdDevice: 1.00
+    0x01,        // iManufacturer: 1 ("Sony")
+    0x02,        // iProduct: 2 ("PLAYSTATION(R)3 Controller")
+    0x00,        // iSerialNumber: 0
+    0x01         // bNumConfigurations: 1
+};
+
+extern "C" uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
+    (void)index;
+    return s_genuine_ds3_config_descriptor;
+}
+
+extern "C" uint8_t const *tud_descriptor_device_cb(void) {
+    return s_genuine_ds3_device_descriptor;
+}
+
+extern "C" uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+    (void)langid;
+    static uint16_t desc_str[64];
+    const char* str = nullptr;
+
+    if (index == 0) {
+        desc_str[0] = (TUSB_DESC_STRING << 8) | 4;
+        desc_str[1] = 0x0409; // English (US)
+        return desc_str;
+    } else if (index == 1) {
+        str = "Sony";
+    } else if (index == 2) {
+        str = "PLAYSTATION(R)3 Controller";
+    } else {
+        return nullptr;
+    }
+
+    uint8_t len = strlen(str);
+    if (len > 62) len = 62;
+    desc_str[0] = (TUSB_DESC_STRING << 8) | (2 * len + 2);
+    for (uint8_t i = 0; i < len; i++) {
+        desc_str[1 + i] = str[i];
+    }
+    return desc_str;
+}
+

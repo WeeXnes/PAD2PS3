@@ -186,30 +186,53 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
 void loop() {
     unsigned long currentMs = millis();
 
-    // Check USB connection state & auto-pulse PS button to activate console pairing
+    // Check USB connection state & handle authentic PS3 pairing sequence
     static unsigned long s_connectedTime = 0;
-    static bool s_psPulsed = false;
+    static bool s_pairingPulseDone = false;
+    static bool s_reportedPaired = false;
 
     if (usb_hid_ready()) {
         if (s_connectedTime == 0) {
             s_connectedTime = currentMs;
-            Serial.println("[MAIN] Host USB connected! Preparing PS button activation pulse...");
+            s_pairingPulseDone = false;
+            s_reportedPaired = false;
+            Serial.println("[MAIN] Host USB connected! Waiting 1.2s for USB enumeration handshake...");
         }
-        if (!s_psPulsed && (currentMs - s_connectedTime >= 800) && (currentMs - s_connectedTime < 1400)) {
-            // Pulse PS button to trigger PS3 console pairing
-            setButton(BTN_PS, true);
-        } else if (!s_psPulsed && (currentMs - s_connectedTime >= 1400)) {
-            setButton(BTN_PS, false);
-            s_psPulsed = true;
-            Serial.println("[MAIN] PS button activation pulse completed! Controller paired.");
+
+        if (usb_hid_is_paired() && !s_reportedPaired) {
+            s_reportedPaired = true;
+            Serial.println("[MAIN] Native PS3 Console Handshake confirmed active!");
+        }
+
+        unsigned long timeSinceConnect = currentMs - s_connectedTime;
+
+        if (!s_pairingPulseDone) {
+            if (timeSinceConnect < 1200) {
+                // Keep neutral and DO NOT send interrupt reports yet while host requests descriptors
+                resetControllerState();
+                delay(1);
+                return;
+            } else if (timeSinceConnect < 2400) {
+                // Hold PS button firmly for 1.2s (1.2-2.4s) to pair with PS3 console
+                resetControllerState();
+                setButton(BTN_PS, true);
+            } else {
+                // Release PS button
+                resetControllerState();
+                setButton(BTN_PS, false);
+                s_pairingPulseDone = true;
+                s_sequenceStartTime = currentMs; // Synchronize test sequence start
+                Serial.println("[MAIN] PS button pairing pulse finished! Starting automated test loop.");
+            }
+        } else {
+            // Pairing pulse complete, run automated test loop
+            updateAutomatedTestSequence(currentMs);
         }
     } else {
         s_connectedTime = 0;
-        s_psPulsed = false;
+        s_pairingPulseDone = false;
+        s_reportedPaired = false;
     }
-
-    // Run automated input generator
-    updateAutomatedTestSequence(currentMs);
 
     // Send HID Report at designated interval (100Hz)
     if (currentMs - s_lastReportTime >= REPORT_INTERVAL_MS) {
