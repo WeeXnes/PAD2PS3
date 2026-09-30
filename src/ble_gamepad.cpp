@@ -1,7 +1,8 @@
 #include "ble_gamepad.h"
 #include <NimBLEDevice.h>
 
-static NimBLEAdvertisedDevice* s_targetDevice = nullptr;
+static NimBLEAddress s_targetAddress;
+static std::string s_targetName = "";
 static NimBLEClient* s_pClient = nullptr;
 static bool s_doConnect = false;
 static bool s_connected = false;
@@ -9,11 +10,10 @@ static bool s_isScanning = false;
 static unsigned long s_lastScanStart = 0;
 static uint8_t s_prevData[64] = {0};
 static size_t s_prevLen = 0;
-static std::string s_connectedName = "";
-static std::string s_connectedAddress = "";
 
-// Forward declarations
-static bool connectToTarget(NimBLEAdvertisedDevice* target);
+static void onScanEnded(NimBLEScanResults results) {
+    s_isScanning = false;
+}
 
 static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
                            uint8_t* pData, size_t length, bool isNotify) {
@@ -56,19 +56,18 @@ static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
 
 class ClientCallbacks : public NimBLEClientCallbacks {
     void onConnect(NimBLEClient* pClient) override {
-        Serial.println("[BLE] GATT connection established!");
+        Serial.println("[BLE] Link layer connected!");
     }
 
     void onDisconnect(NimBLEClient* pClient) override {
         s_connected = false;
         s_prevLen = 0;
         Serial.println("[BLE] Disconnected from BLE gamepad!");
-        Serial.println("[BLE] Restarting scan in 2 seconds...");
+        Serial.println("[BLE] Resuming scan in 2 seconds...");
         s_lastScanStart = millis() + 2000;
     }
 
     bool onConnParamsUpdateRequest(NimBLEClient* pClient, const ble_gap_upd_params* params) override {
-        // Accept any connection parameter update requested by the gamepad
         return true;
     }
 };
@@ -100,10 +99,8 @@ class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
             NimBLEDevice::getScan()->stop();
             s_isScanning = false;
 
-            if (s_targetDevice != nullptr) {
-                delete s_targetDevice;
-            }
-            s_targetDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
+            s_targetAddress = advertisedDevice->getAddress();
+            s_targetName = name;
             s_doConnect = true;
         } else if (!name.empty()) {
             Serial.printf("[BLE SCAN] Nearby BLE device: '%s' (%s)\n", name.c_str(), addr.c_str());
@@ -117,8 +114,11 @@ void ble_gamepad_init() {
     Serial.println("[BLE] Initializing NimBLE Bluetooth Stack...");
     NimBLEDevice::init("PS3-Bridge-Host");
 
-    // Enable bonding and encryption for HID gamepads like Google Stadia
-    NimBLEDevice::setSecurityAuth(true, true, true);
+    // Boost TX power for strong connection link
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+    // Standard "Just Works" pairing with bonding enabled (essential for Google Stadia & BLE gamepads)
+    NimBLEDevice::setSecurityAuth(true, false, true);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
     NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
@@ -126,8 +126,8 @@ void ble_gamepad_init() {
     NimBLEScan* pScan = NimBLEDevice::getScan();
     pScan->setAdvertisedDeviceCallbacks(&s_advCallbacks, false);
     pScan->setActiveScan(true);
-    pScan->setInterval(100);
-    pScan->setWindow(99);
+    pScan->setInterval(80);
+    pScan->setWindow(60);
 
     ble_gamepad_start_scan();
 }
@@ -147,40 +147,48 @@ void ble_gamepad_start_scan() {
     Serial.println("[BLE] TIP: For Google Stadia, hold 'Y' + Stadia button for 2s until orange light pulses!");
     s_isScanning = true;
     s_lastScanStart = millis();
-    pScan->start(0, false); // 0 = continuous scan until found
+    // Non-blocking scan with callback
+    pScan->start(0, onScanEnded, false);
 }
 
-static bool connectToTarget(NimBLEAdvertisedDevice* target) {
-    if (!target) return false;
+static bool connectToTarget(const NimBLEAddress& address, const std::string& name) {
+    Serial.printf("[BLE] Connecting to %s (%s)...\n", name.c_str(), address.toString().c_str());
 
-    s_connectedName = target->getName();
-    s_connectedAddress = target->getAddress().toString();
+    // Small delay after stopping scan to let BLE radio settle
+    delay(100);
 
-    Serial.printf("[BLE] Connecting to %s (%s)...\n", s_connectedName.c_str(), s_connectedAddress.c_str());
-
-    if (s_pClient == nullptr) {
-        s_pClient = NimBLEDevice::createClient();
-        s_pClient->setClientCallbacks(&s_clientCallbacks, false);
-        // Standard fast BLE interval: 10-15ms for low latency controller input
-        s_pClient->setConnectionParams(10, 15, 0, 150);
-        s_pClient->setConnectTimeout(5);
+    NimBLEClient* pClient = nullptr;
+    if (NimBLEDevice::getClientListSize()) {
+        pClient = NimBLEDevice::getClientByPeerAddress(address);
+    }
+    if (!pClient) {
+        if (NimBLEDevice::getClientListSize() >= NIMBLE_MAX_CONNECTIONS) {
+            pClient = NimBLEDevice::getDisconnectedClient();
+        }
+        if (!pClient) {
+            pClient = NimBLEDevice::createClient();
+        }
+        pClient->setClientCallbacks(&s_clientCallbacks, false);
     }
 
-    if (!s_pClient->connect(target)) {
-        Serial.println("[BLE] ERROR: Connection failed! Resuming scan...");
+    // Set connection timeout to 10 seconds for secure bonding negotiation
+    pClient->setConnectTimeout(10);
+
+    if (!pClient->connect(address)) {
+        Serial.println("[BLE] ERROR: Link connection failed! Retrying scan...");
+        NimBLEDevice::deleteClient(pClient);
         s_connected = false;
-        ble_gamepad_start_scan();
         return false;
     }
 
-    Serial.println("[BLE] Connected! Securing link / bonding...");
-    s_pClient->secureConnection();
+    Serial.println("[BLE] Link established! Securing connection & bonding...");
+    pClient->secureConnection();
 
     Serial.println("[BLE] Discovering HID service (0x1812)...");
-    NimBLERemoteService* pHidService = s_pClient->getService(NimBLEUUID((uint16_t)0x1812));
+    NimBLERemoteService* pHidService = pClient->getService(NimBLEUUID((uint16_t)0x1812));
     if (!pHidService) {
-        Serial.println("[BLE] Warning: 0x1812 not found directly, performing full service discovery...");
-        auto services = s_pClient->getServices(true);
+        Serial.println("[BLE] Performing full service discovery...");
+        auto services = pClient->getServices(true);
         if (services) {
             for (auto s : *services) {
                 if (s->getUUID() == NimBLEUUID((uint16_t)0x1812)) {
@@ -193,7 +201,7 @@ static bool connectToTarget(NimBLEAdvertisedDevice* target) {
 
     if (!pHidService) {
         Serial.println("[BLE] ERROR: No HID Service (0x1812) found on target device!");
-        s_pClient->disconnect();
+        pClient->disconnect();
         return false;
     }
 
@@ -203,7 +211,6 @@ static bool connectToTarget(NimBLEAdvertisedDevice* target) {
 
     if (chars) {
         for (auto chr : *chars) {
-            // Report characteristic UUID is 0x2A4D
             if (chr->canNotify()) {
                 Serial.printf("[BLE] Subscribing to HID Report Char %s (handle 0x%04X)...\n",
                               chr->getUUID().toString().c_str(), chr->getHandle());
@@ -217,71 +224,41 @@ static bool connectToTarget(NimBLEAdvertisedDevice* target) {
         }
     }
 
-    if (subscribedCount == 0) {
-        Serial.println("[BLE] Warning: Could not find notifiable 0x2A4D characteristic in 0x1812. Checking all services...");
-        auto allServices = s_pClient->getServices(true);
-        if (allServices) {
-            for (auto s : *allServices) {
-                auto sc = s->getCharacteristics(true);
-                if (sc) {
-                    for (auto c : *sc) {
-                        if (c->canNotify() && c->getUUID() == NimBLEUUID((uint16_t)0x2A4D)) {
-                            Serial.printf("[BLE] Found Report in service %s, subscribing...\n", s->getUUID().toString().c_str());
-                            if (c->subscribe(true, notifyCallback, false)) {
-                                subscribedCount++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     s_connected = (subscribedCount > 0);
     if (s_connected) {
+        s_pClient = pClient;
         s_prevLen = 0;
         Serial.println("==================================================");
         Serial.println("[BLE] *** BLE GAMEPAD SUCCESSFULLY PAIRED & CONNECTED! ***");
-        Serial.printf("[BLE] Device: %s (%s)\n", s_connectedName.c_str(), s_connectedAddress.c_str());
+        Serial.printf("[BLE] Device: %s (%s)\n", name.c_str(), address.toString().c_str());
         Serial.println("==================================================");
         Serial.println("[CALIBRATION WIZARD] Live button logger is ACTIVE.");
-        Serial.println("Please press the controller buttons ONE AT A TIME in this order:");
+        Serial.println("Please press the controller buttons ONE AT A TIME:");
         Serial.println("  1.  A / CROSS (Bottom action button)");
         Serial.println("  2.  B / CIRCLE (Right action button)");
         Serial.println("  3.  X / SQUARE (Left action button)");
         Serial.println("  4.  Y / TRIANGLE (Top action button)");
-        Serial.println("  5.  D-PAD: UP");
-        Serial.println("  6.  D-PAD: DOWN");
-        Serial.println("  7.  D-PAD: LEFT");
-        Serial.println("  8.  D-PAD: RIGHT");
-        Serial.println("  9.  L1 / Left Shoulder Bumper");
-        Serial.println(" 10.  R1 / Right Shoulder Bumper");
-        Serial.println(" 11.  L2 / Left Trigger");
-        Serial.println(" 12.  R2 / Right Trigger");
-        Serial.println(" 13.  L3 / Left Stick Click");
-        Serial.println(" 14.  R3 / Right Stick Click");
-        Serial.println(" 15.  OPTIONS / SELECT (Left center button)");
-        Serial.println(" 16.  MENU / START (Right center button)");
-        Serial.println(" 17.  STADIA / PS Button (Middle center logo)");
-        Serial.println(" 18.  ASSISTANT Button (if Stadia)");
-        Serial.println(" 19.  CAPTURE Button (if Stadia)");
-        Serial.println(" 20.  Left Stick full left/right and up/down");
-        Serial.println(" 21.  Right Stick full left/right and up/down");
+        Serial.println("  5.  D-PAD: UP, DOWN, LEFT, RIGHT");
+        Serial.println("  6.  L1 & R1 (Shoulders)");
+        Serial.println("  7.  L2 & R2 (Triggers)");
+        Serial.println("  8.  L3 & R3 (Stick clicks)");
+        Serial.println("  9.  OPTIONS / SELECT & MENU / START");
+        Serial.println(" 10.  STADIA Logo Button");
+        Serial.println(" 11.  ASSISTANT & CAPTURE buttons");
+        Serial.println(" 12.  Left & Right Analog Sticks");
         Serial.println("==================================================");
     } else {
         Serial.println("[BLE] ERROR: No notifiable input reports could be subscribed.");
-        s_pClient->disconnect();
+        pClient->disconnect();
     }
 
     return s_connected;
 }
 
 void ble_gamepad_loop() {
-    if (s_doConnect && s_targetDevice != nullptr) {
+    if (s_doConnect) {
         s_doConnect = false;
-        connectToTarget(s_targetDevice);
-        delete s_targetDevice;
-        s_targetDevice = nullptr;
+        connectToTarget(s_targetAddress, s_targetName);
     }
 
     // Auto-restart scan if disconnected and not scanning
@@ -301,7 +278,7 @@ void ble_gamepad_print_status() {
     Serial.println("--- BLE Gamepad Status ---");
     Serial.printf("Connected: %s\n", s_connected ? "YES" : "NO");
     if (s_connected) {
-        Serial.printf("Device:    %s (%s)\n", s_connectedName.c_str(), s_connectedAddress.c_str());
+        Serial.printf("Device:    %s (%s)\n", s_targetName.c_str(), s_targetAddress.toString().c_str());
     } else {
         NimBLEScan* pScan = NimBLEDevice::getScan();
         Serial.printf("Scanning:  %s\n", (pScan && pScan->isScanning()) ? "ACTIVE" : "IDLE");
