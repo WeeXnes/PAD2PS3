@@ -337,26 +337,76 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
     return s_connected;
 }
 
+static uint8_t s_targetRumbleSmall = 0;
+static uint8_t s_targetRumbleBig = 0;
+static bool s_rumbleChanged = false;
+static unsigned long s_lastRumbleSendMs = 0;
+static uint8_t s_rumbleIntensityPercent = 60; // Default 60% master rumble intensity
+
+void ble_gamepad_set_rumble_intensity(uint8_t percent) {
+    if (percent > 100) percent = 100;
+    s_rumbleIntensityPercent = percent;
+    s_rumbleChanged = true;
+    Serial.printf("[BLE] Rumble master intensity set to %u%%\n", percent);
+}
+
+uint8_t ble_gamepad_get_rumble_intensity() {
+    return s_rumbleIntensityPercent;
+}
+
 void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor) {
-    if (!s_connected || s_pRumbleChar == nullptr) {
+    // Non-blocking: update targets immediately so TinyUSB control endpoint ISR is never stalled
+    if (s_targetRumbleSmall != small_motor || s_targetRumbleBig != big_motor) {
+        s_targetRumbleSmall = small_motor;
+        s_targetRumbleBig = big_motor;
+        s_rumbleChanged = true;
+    }
+}
+
+static void processPendingRumble() {
+    if (!s_connected || s_pRumbleChar == nullptr || !s_rumbleChanged) {
+        return;
+    }
+    if (s_pClient == nullptr || !s_pClient->isConnected()) {
         return;
     }
 
-    // Convert PS3 motor values to Stadia 16-bit values (0..65534):
-    // big_motor (left): heavy low-frequency motor, 0..255
-    uint32_t l_scaled = (uint32_t)big_motor * 257;
-    if (l_scaled > 65534) l_scaled = 65534;
-    uint16_t left_16 = (uint16_t)l_scaled;
-
-    // small_motor (right): light high-frequency motor, 0 or 1 on PS3 (or 0..255)
-    uint16_t right_16 = 0;
-    if (small_motor > 0) {
-        uint32_t r_scaled = (small_motor == 1) ? 65534 : ((uint32_t)small_motor * 257);
-        if (r_scaled > 65534) r_scaled = 65534;
-        right_16 = (uint16_t)r_scaled;
+    unsigned long now = millis();
+    // Allow immediate write when turning off rumble (0,0), otherwise rate-limit to 40ms intervals
+    bool stopping = (s_targetRumbleSmall == 0 && s_targetRumbleBig == 0);
+    if (!stopping && (now - s_lastRumbleSendMs < 40)) {
+        return;
     }
 
-    // Suppress redundant writes to prevent flooding BLE link
+    s_lastRumbleSendMs = now;
+    s_rumbleChanged = false;
+
+    // Convert PS3 motor values to Stadia 16-bit values (0..65534):
+    // 1. Right motor (small_motor): High-frequency light buzz on PS3 (binary 0 or 1, or 0..255).
+    // On original DS3, value 1 is a moderate high-pitch buzz (~35-40% power).
+    // We map 1 to 24,000 base power (~36%), which feels crisp without excessive rattling.
+    uint32_t r_base = 0;
+    if (s_targetRumbleSmall == 1) {
+        r_base = 24000;
+    } else if (s_targetRumbleSmall > 1) {
+        r_base = ((uint32_t)s_targetRumbleSmall * 24000) / 255;
+    }
+
+    // 2. Left motor (big_motor): Heavy low-frequency rumble (0..255).
+    // Linear base scale to 65534.
+    uint32_t l_base = (uint32_t)s_targetRumbleBig * 257;
+    if (l_base > 65534) l_base = 65534;
+
+    // 3. Apply master intensity scaling percentage (default 60%)
+    uint32_t l_scaled = (l_base * s_rumbleIntensityPercent) / 100;
+    uint32_t r_scaled = (r_base * s_rumbleIntensityPercent) / 100;
+
+    if (l_scaled > 65534) l_scaled = 65534;
+    if (r_scaled > 65534) r_scaled = 65534;
+
+    uint16_t left_16  = (uint16_t)l_scaled;
+    uint16_t right_16 = (uint16_t)r_scaled;
+
     if (left_16 == s_lastRumbleLeft && right_16 == s_lastRumbleRight) {
         return;
     }
@@ -371,10 +421,7 @@ void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor) {
     payload[3] = (uint8_t)((right_16 >> 8) & 0xFF);
 
     bool noResponse = s_pRumbleChar->canWriteNoResponse();
-    bool ok = s_pRumbleChar->writeValue(payload, sizeof(payload), !noResponse);
-    if (!ok && noResponse) {
-        s_pRumbleChar->writeValue(payload, sizeof(payload), true);
-    }
+    s_pRumbleChar->writeValue(payload, sizeof(payload), !noResponse);
 }
 
 void ble_gamepad_loop() {
@@ -382,6 +429,9 @@ void ble_gamepad_loop() {
         s_doConnect = false;
         connectToTarget(s_targetAddress, s_targetName);
     }
+
+    // Safely process rumble in main loop context (outside USB ISR)
+    processPendingRumble();
 
     // Auto-restart scan if disconnected, not connecting, and timeout elapsed
     if (!s_connected && !s_doConnect) {

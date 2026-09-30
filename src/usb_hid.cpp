@@ -508,7 +508,7 @@ bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry,
     rep.reserved[1] = 0x02;
 
     // Send 48 bytes with Report ID 0x01 (TinyUSB prepends ID making 49 bytes on wire)
-    return s_hid.SendReport(0x01, &rep, sizeof(rep), 25);
+    return s_hid.SendReport(0x01, &rep, sizeof(rep), 15);
 }
 
 // ---------------------------------------------------------------------------

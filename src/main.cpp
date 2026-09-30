@@ -206,6 +206,7 @@ static void printCliHelp() {
     Serial.println("                    center / reset");
     Serial.println("  Modes & Utility:  demo (toggle automated demo loop on/off)");
     Serial.println("                    log / debug (toggle live input logging on/off)");
+    Serial.println("                    intensity <0-100> (set master rumble intensity percent)");
     Serial.println("                    rumble [0-255] (pulse controller vibration motors)");
     Serial.println("                    status, help / ?");
     Serial.println("  Bluetooth / BLE:  scan (start BLE scan for Stadia/gamepad)");
@@ -378,6 +379,17 @@ static void processSerialCLI(unsigned long currentMs) {
                 bool newState = !getDebugLog();
                 setDebugLog(newState);
                 Serial.printf("[CLI] Live input logging: %s (type 'log' to toggle)\n", newState ? "ENABLED" : "DISABLED");
+            } else if (strncmp(p, "intensity", 9) == 0 || strncmp(p, "power", 5) == 0) {
+                char* arg = p;
+                while (*arg >= 'a' && *arg <= 'z') arg++;
+                while (*arg == ' ') arg++;
+                if (*arg) {
+                    int val = atoi(arg);
+                    if (val < 0) val = 0; else if (val > 100) val = 100;
+                    ble_gamepad_set_rumble_intensity((uint8_t)val);
+                } else {
+                    Serial.printf("[CLI] Current rumble master intensity: %u%%\n", ble_gamepad_get_rumble_intensity());
+                }
             } else if (strncmp(p, "rumble", 6) == 0) {
                 int pwr = 255;
                 if (strlen(p) > 6) {
@@ -421,7 +433,7 @@ void loop() {
     static bool s_reportedPaired = false;
     static bool s_wasMounted = false;
 
-    if (usb_hid_ready()) {
+    if (usb_hid_is_mounted()) {
         if (!s_wasMounted) {
             s_wasMounted = true;
             s_connectedTime = currentMs;
@@ -474,16 +486,18 @@ void loop() {
 
         // Send HID Report at designated interval (100Hz = 10ms)
         if (currentMs - s_lastReportTime >= REPORT_INTERVAL_MS) {
-            s_lastReportTime = currentMs;
-            sendReport();
+            if (s_pairingPulseDone && usb_hid_ready()) {
+                s_lastReportTime = currentMs;
+                sendReport();
+            }
+        }
 
-            // Only print periodic debug state if automated demo loop is enabled
-            if (s_demoEnabled) {
-                static unsigned long s_lastDebugPrint = 0;
-                if (currentMs - s_lastDebugPrint >= 500) {
-                    s_lastDebugPrint = currentMs;
-                    printControllerState();
-                }
+        // Only print periodic debug state if automated demo loop is enabled
+        if (s_demoEnabled) {
+            static unsigned long s_lastDebugPrint = 0;
+            if (currentMs - s_lastDebugPrint >= 500) {
+                s_lastDebugPrint = currentMs;
+                printControllerState();
             }
         }
     } else {
