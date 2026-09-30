@@ -23,16 +23,15 @@
  */
 #pragma pack(push, 1)
 struct PS3NativeInputReport {
-    uint8_t report_id;   // 0x01
     uint8_t unk0;        // 0x00
     uint8_t buttons1;    // Select, L3, R3, Start, Up, Right, Down, Left
     uint8_t buttons2;    // L2, R2, L1, R1, Triangle, Circle, Cross, Square
     uint8_t ps_button;   // Bit 0: PS button
     uint8_t unk1;        // 0x00
-    uint8_t left_x;      // Left stick X (0..255)
-    uint8_t left_y;      // Left stick Y (0..255)
-    uint8_t right_x;     // Right stick X (0..255)
-    uint8_t right_y;     // Right stick Y (0..255)
+    uint8_t left_x;      // Left stick X (0..255, 128=center)
+    uint8_t left_y;      // Left stick Y (0..255, 128=center)
+    uint8_t right_x;     // Right stick X (0..255, 128=center)
+    uint8_t right_y;     // Right stick Y (0..255, 128=center)
     uint8_t unk2[4];     // Reserved
     // Pressure sensitive buttons (0..255)
     uint8_t press_up;
@@ -47,14 +46,14 @@ struct PS3NativeInputReport {
     uint8_t press_circle;
     uint8_t press_cross;
     uint8_t press_square;
-    uint8_t unk3[3];     // Reserved
-    uint8_t charge;      // Battery status
-    uint8_t connection;  // Power status
+    uint8_t unk3[4];     // Reserved (4 bytes, making charge at byte offset 30)
+    uint8_t charge;      // Battery status (0xEE = 100% full/charging, offset 30)
+    uint8_t connection;  // Power status (0x02 = USB connected, offset 31)
     uint8_t unk4[9];     // Reserved
-    int16_t accel_x;
-    int16_t accel_y;
-    int16_t accel_z;
-    int16_t gyro_z;
+    int16_t accel_x;     // Accelerometer X
+    int16_t accel_y;     // Accelerometer Y
+    int16_t accel_z;     // Accelerometer Z
+    int16_t gyro_z;      // Gyro Z
 };
 #pragma pack(pop)
 
