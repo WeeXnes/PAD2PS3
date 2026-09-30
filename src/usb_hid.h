@@ -65,7 +65,9 @@ struct PS3NativeInputReport {
 
 // Public API
 bool usb_hid_init();
+bool usb_hid_is_mounted();
 bool usb_hid_ready();
+bool usb_hid_handshake_ready();
 bool usb_hid_is_paired();
 bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry, uint8_t hat, uint32_t buttons);
 

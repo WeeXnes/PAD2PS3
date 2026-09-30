@@ -14,3 +14,7 @@ compile_commands.json
 # System files
 .DS_Store
 Thumbs.db
+
+# Scratch and test files
+scratch*
+*.py

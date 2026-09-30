@@ -170,6 +170,13 @@ static const uint8_t s_ds3_resp_0xF8[64] = {
     0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
+static const uint8_t s_ds3_resp_0xEF_b0[64] = {
+    0x00, 0xEF, 0x04, 0x00, 0x08, 0x03, 0x01, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x6A, 0x02, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 static const uint8_t s_ds3_resp_0xF7[64] = {
     0x01, 0x00, 0xFE, 0x02, 0xCE, 0x01, 0xEE, 0xFF, 0x10, 0x12, 0x00, 0x02, 0xFE, 0x01, 0xCE, 0x00,
     0x00, 0x02, 0x02, 0x02, 0x00, 0x03, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x62, 0x01, 0x02, 0x01,
@@ -181,6 +188,8 @@ static uint8_t s_hostMac[6] = {0};
 static bool s_hasHostMac = false;
 static bool s_paired = false;
 static bool s_streamingActive = false;
+static uint8_t s_ef_subcmd = 0xA0;
+static bool s_handshake_features_done = false;
 
 class PS3USBHIDDevice : public USBHIDDevice {
 public:
@@ -195,51 +204,52 @@ public:
         Serial.printf("[USB HID] GET_REPORT (Feature): ID 0x%02X, req len %u\n", report_id, reqlen);
 
         const uint8_t* src = nullptr;
-        uint16_t src_len = 0;
 
         switch (report_id) {
             case 0x01:
                 src = s_ds3_resp_0x01;
-                src_len = sizeof(s_ds3_resp_0x01);
                 break;
             case 0xF2:
                 src = s_ds3_resp_0xF2;
-                src_len = sizeof(s_ds3_resp_0xF2);
                 break;
             case 0xF5: {
-                uint16_t copy_len = (reqlen < sizeof(s_ds3_resp_0xF5_template)) ? reqlen : sizeof(s_ds3_resp_0xF5_template);
-                memcpy(buffer, s_ds3_resp_0xF5_template, copy_len);
-                if (s_hasHostMac && copy_len >= 8) {
-                    memcpy(&buffer[2], s_hostMac, 6);
+                static uint8_t f5_buf[64];
+                memcpy(f5_buf, s_ds3_resp_0xF5_template, 64);
+                if (s_hasHostMac) {
+                    memcpy(&f5_buf[2], s_hostMac, 6);
                 }
-                return copy_len;
+                src = f5_buf;
+                break;
             }
             case 0xEF:
-                src = s_ds3_resp_0xEF;
-                src_len = sizeof(s_ds3_resp_0xEF);
+                if (s_ef_subcmd == 0xB0) {
+                    src = s_ds3_resp_0xEF_b0;
+                } else {
+                    src = s_ds3_resp_0xEF;
+                }
                 break;
             case 0xF8:
                 src = s_ds3_resp_0xF8;
-                src_len = sizeof(s_ds3_resp_0xF8);
                 break;
             case 0xF7:
                 src = s_ds3_resp_0xF7;
-                src_len = sizeof(s_ds3_resp_0xF7);
+                s_handshake_features_done = true;
+                Serial.println("[USB HID] *** Handshake features completed (0xF7)! Ready for PS button pulse ***");
                 break;
             default:
                 break;
         }
 
-        if (src && src_len > 0) {
-            uint16_t copy_len = (reqlen < src_len) ? reqlen : src_len;
-            memcpy(buffer, src, copy_len);
-            return copy_len;
+        if (src) {
+            // Overwrite starting at buffer - 1 (p_epbuf->ctrl[0]) so byte 0 matches
+            // authentic DS3 wire bytes (compensating for TinyUSB's default report_id injection)
+            uint8_t* wire_buf = buffer - 1;
+            memcpy(wire_buf, src, 64);
+            return 63; // 1 + 63 = 64 bytes total sent by tud_control_xfer
         }
 
-        // Fallback: respond cleanly so TinyUSB never stalls
         if (reqlen > 0) {
             memset(buffer, 0, reqlen);
-            buffer[0] = report_id;
             return reqlen;
         }
         return 0;
@@ -248,7 +258,10 @@ public:
     void _onSetFeature(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
         Serial.printf("[USB HID] SET_REPORT (Feature): ID 0x%02X, len %u\n", report_id, len);
 
-        if (report_id == 0xF4) {
+        if (report_id == 0xEF && len >= 7) {
+            s_ef_subcmd = buffer[6]; // 0xA0 or 0xB0
+            Serial.printf("[USB HID] SET_REPORT 0xEF subcmd: 0x%02X\n", s_ef_subcmd);
+        } else if (report_id == 0xF4) {
             if (len >= 2) {
                 Serial.printf("[USB HID] F4 Controller Command: 0x%02X 0x%02X\n", buffer[0], buffer[1]);
                 if (buffer[0] == 0x42 && (buffer[1] == 0x02 || buffer[1] == 0x0C)) {
@@ -295,6 +308,9 @@ static USBHID s_hid;
 static PS3USBHIDDevice s_device;
 static bool s_initialized = false;
 
+extern "C" uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance);
+extern USBHIDDevice * tinyusb_get_device_by_report_id(uint8_t report_id);
+
 bool usb_hid_init() {
     if (s_initialized) {
         return true;
@@ -323,6 +339,23 @@ bool usb_hid_init() {
     s_hid.begin();
     bool usb_ok = USB.begin();
 
+    // Critical PS3 Compatibility Fix:
+    // PS3 console never requests GET_DESCRIPTOR HID_REPORT (0x22).
+    // In Arduino ESP32 USBHID, device report IDs are ONLY loaded on demand when
+    // tud_hid_descriptor_report_cb() is invoked. Because PS3 never queries it,
+    // tud_hid_descriptor_report_cb() was never called, leaving report_ids empty
+    // and causing TinyUSB to STALL all PS3 feature report queries!
+    // We explicitly call tud_hid_descriptor_report_cb(0) here to parse and register
+    // all report IDs immediately at boot.
+    uint8_t const* desc = tud_hid_descriptor_report_cb(0);
+    Serial.printf("[USB HID] Pre-loaded report map: %p\n", desc);
+
+    const uint8_t check_ids[] = {0x01, 0x02, 0xEE, 0xEF, 0xF1, 0xF2, 0xF4, 0xF5, 0xF7, 0xF8};
+    for (uint8_t id : check_ids) {
+        USBHIDDevice* dev = tinyusb_get_device_by_report_id(id);
+        Serial.printf("[USB HID] Report 0x%02X -> %s\n", id, dev ? "READY" : "MISSING!");
+    }
+
     Serial.printf("[USB] VID: %d, PID: %d, Prod: %d, Mfr: %d, FW: %d, USB begin: %d\n",
                   vid_ok, pid_ok, prod_ok, mfr_ok, fw_ok, usb_ok);
 
@@ -330,8 +363,24 @@ bool usb_hid_init() {
     return true;
 }
 
+#include "tusb.h"
+
+bool usb_hid_is_mounted() {
+    bool m = s_initialized && tud_mounted();
+    if (!m) {
+        s_handshake_features_done = false;
+        s_streamingActive = false;
+        s_paired = false;
+    }
+    return m;
+}
+
 bool usb_hid_ready() {
-    return s_initialized && ((bool)USB);
+    return usb_hid_is_mounted() && s_hid.ready();
+}
+
+bool usb_hid_handshake_ready() {
+    return s_handshake_features_done;
 }
 
 bool usb_hid_is_paired() {

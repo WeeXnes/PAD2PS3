@@ -47,11 +47,7 @@ void setup() {
     logMsg("ESP32-S3 PS3 Controller Emulator");
     logMsg("Identity: Sony PLAYSTATION(R)3 Controller");
     logMsg("==================================================");
-    logMsg("USB HID initialized successfully");
-
-    // Send initial centered/released report
-    sendReport();
-    printControllerState();
+    logMsg("Waiting for USB host connection...");
 
     s_sequenceStartTime = millis();
     s_lastReportTime = millis();
@@ -188,15 +184,19 @@ void loop() {
 
     // Check USB connection state & handle authentic PS3 pairing sequence
     static unsigned long s_connectedTime = 0;
+    static unsigned long s_pulseStartTime = 0;
     static bool s_pairingPulseDone = false;
     static bool s_reportedPaired = false;
+    static bool s_wasMounted = false;
 
     if (usb_hid_ready()) {
-        if (s_connectedTime == 0) {
+        if (!s_wasMounted) {
+            s_wasMounted = true;
             s_connectedTime = currentMs;
+            s_pulseStartTime = 0;
             s_pairingPulseDone = false;
             s_reportedPaired = false;
-            Serial.println("[MAIN] Host USB connected! Waiting 1.2s for USB enumeration handshake...");
+            Serial.println("[MAIN] Host USB mounted & ready! Waiting for PS3 feature exchange...");
         }
 
         if (usb_hid_is_paired() && !s_reportedPaired) {
@@ -204,16 +204,24 @@ void loop() {
             Serial.println("[MAIN] Native PS3 Console Handshake confirmed active!");
         }
 
-        unsigned long timeSinceConnect = currentMs - s_connectedTime;
-
         if (!s_pairingPulseDone) {
-            if (timeSinceConnect < 1200) {
-                // Keep neutral and DO NOT send interrupt reports yet while host requests descriptors
+            // DO NOT send ANY interrupt reports until PS3 completes Feature Reports (0xF7)!
+            // Fallback timeout: 2500ms in case connected to PC where 0xF7 is not requested
+            bool readyForPulse = usb_hid_handshake_ready() || (currentMs - s_connectedTime > 2500);
+
+            if (!readyForPulse) {
                 resetControllerState();
                 delay(1);
                 return;
-            } else if (timeSinceConnect < 2400) {
-                // Hold PS button firmly for 1.2s (1.2-2.4s) to pair with PS3 console
+            }
+
+            if (s_pulseStartTime == 0) {
+                s_pulseStartTime = currentMs;
+                Serial.println("[MAIN] Feature exchange done! Sending PS button pulse to pair with PS3...");
+            }
+
+            // Hold PS button until PS3 sends F4 command (usb_hid_is_paired()) or for 1200ms max
+            if (!usb_hid_is_paired() && (currentMs - s_pulseStartTime < 1200)) {
                 resetControllerState();
                 setButton(BTN_PS, true);
             } else {
@@ -221,31 +229,37 @@ void loop() {
                 resetControllerState();
                 setButton(BTN_PS, false);
                 s_pairingPulseDone = true;
-                s_sequenceStartTime = currentMs; // Synchronize test sequence start
-                Serial.println("[MAIN] PS button pairing pulse finished! Starting automated test loop.");
+                s_sequenceStartTime = currentMs;
+                Serial.println("[MAIN] Controller paired & active! Starting automated test loop.");
             }
         } else {
             // Pairing pulse complete, run automated test loop
             updateAutomatedTestSequence(currentMs);
         }
-    } else {
-        s_connectedTime = 0;
-        s_pairingPulseDone = false;
-        s_reportedPaired = false;
-    }
 
-    // Send HID Report at designated interval (100Hz)
-    if (currentMs - s_lastReportTime >= REPORT_INTERVAL_MS) {
-        s_lastReportTime = currentMs;
+        // Send HID Report at designated interval (100Hz = 10ms)
+        if (currentMs - s_lastReportTime >= REPORT_INTERVAL_MS) {
+            s_lastReportTime = currentMs;
 
-        sendReport();
+            sendReport();
 
-        // Print debug status every 500ms
-        static unsigned long s_lastDebugPrint = 0;
-        if (currentMs - s_lastDebugPrint >= 500) {
-            s_lastDebugPrint = currentMs;
-            printControllerState();
+            // Print debug status every 500ms
+            static unsigned long s_lastDebugPrint = 0;
+            if (currentMs - s_lastDebugPrint >= 500) {
+                s_lastDebugPrint = currentMs;
+                printControllerState();
+            }
         }
+    } else {
+        if (s_wasMounted) {
+            s_wasMounted = false;
+            s_connectedTime = 0;
+            s_pulseStartTime = 0;
+            s_pairingPulseDone = false;
+            s_reportedPaired = false;
+            Serial.println("[MAIN] Host USB disconnected / idle.");
+        }
+        resetControllerState();
     }
 
     // Yield to freeRTOS scheduler / USB background tasks
