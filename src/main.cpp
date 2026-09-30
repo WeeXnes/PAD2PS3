@@ -265,9 +265,16 @@ static void processSerialCLI(unsigned long currentMs) {
             cmdBuf[cmdLen] = '\0';
             cmdLen = 0;
 
-            // Trim leading spaces
+            // Trim leading non-printable characters or whitespace
             char* p = cmdBuf;
-            while (*p == ' ') p++;
+            while (*p && ((unsigned char)*p <= ' ' || (unsigned char)*p > 126)) p++;
+            // Trim trailing non-printable characters or whitespace
+            int len = strlen(p);
+            while (len > 0 && ((unsigned char)p[len - 1] <= ' ' || (unsigned char)p[len - 1] > 126)) {
+                p[--len] = '\0';
+            }
+            if (*p == '\0') continue;
+
             // Convert to lowercase
             for (char* s = p; *s; s++) {
                 if (*s >= 'A' && *s <= 'Z') *s += 32;

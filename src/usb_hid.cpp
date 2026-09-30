@@ -190,6 +190,8 @@ static bool s_paired = false;
 static bool s_streamingActive = false;
 static uint8_t s_ef_subcmd = 0xA0;
 static bool s_handshake_features_done = false;
+static int s_lastAssignedPlayer = -1;
+static uint8_t s_lastLedField = 0;
 
 class PS3USBHIDDevice : public USBHIDDevice {
 public:
@@ -256,7 +258,11 @@ public:
     }
 
     void _onSetFeature(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        Serial.printf("[USB HID] SET_REPORT (Feature): ID 0x%02X, len %u\n", report_id, len);
+        // Report 0x01 is periodically sent by the PS3 as a keepalive / LED refresh.
+        // We suppress the raw log for 0x01 to keep the serial CLI clean.
+        if (report_id != 0x01) {
+            Serial.printf("[USB HID] SET_REPORT (Feature): ID 0x%02X, len %u\n", report_id, len);
+        }
 
         if (report_id == 0xEF && len >= 7) {
             s_ef_subcmd = buffer[6]; // 0xA0 or 0xB0
@@ -284,7 +290,9 @@ public:
     }
 
     void _onOutput(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        Serial.printf("[USB HID] SET_REPORT (Output): ID 0x%02X, len %u\n", report_id, len);
+        if (report_id != 0x01 && report_id != 0x00) {
+            Serial.printf("[USB HID] SET_REPORT (Output): ID 0x%02X, len %u\n", report_id, len);
+        }
         if (report_id == 0x01 || report_id == 0x00) {
             handleOutputReport(buffer, len);
         }
@@ -298,7 +306,12 @@ private:
             if (leds != 0) {
                 s_paired = true;
                 int player = (leds & 1) ? 1 : ((leds & 2) ? 2 : ((leds & 4) ? 3 : 4));
-                Serial.printf("[USB HID] *** PS3 ASSIGNED PLAYER %d (LED field 0x%02X) ***\n", player, led_field);
+                // Only log if the assigned player or LED field has changed
+                if (player != s_lastAssignedPlayer || led_field != s_lastLedField) {
+                    s_lastAssignedPlayer = player;
+                    s_lastLedField = led_field;
+                    Serial.printf("[USB HID] *** PS3 ASSIGNED PLAYER %d (LED field 0x%02X) ***\n", player, led_field);
+                }
             }
         }
     }
@@ -371,6 +384,8 @@ bool usb_hid_is_mounted() {
         s_handshake_features_done = false;
         s_streamingActive = false;
         s_paired = false;
+        s_lastAssignedPlayer = -1;
+        s_lastLedField = 0;
     }
     return m;
 }
