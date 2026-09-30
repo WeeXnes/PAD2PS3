@@ -2,6 +2,7 @@
 #include <math.h>
 #include "usb_hid.h"
 #include "controller_state.h"
+#include "ble_gamepad.h"
 
 // Report interval: 10ms = 100Hz standard USB controller polling rate
 static const unsigned long REPORT_INTERVAL_MS = 10;
@@ -40,6 +41,9 @@ void setup() {
 
     // 2. Initialize Native USB HID stack (sets Sony VID 0x054C, PID 0x0268, and begins USB)
     usb_hid_init();
+
+    // 3. Initialize BLE Central Gamepad Host (for wireless Stadia / BLE gamepads)
+    ble_gamepad_init();
 
     delay(300);
 
@@ -201,6 +205,8 @@ static void printCliHelp() {
     Serial.println("                    center / reset");
     Serial.println("  Modes & Utility:  demo (toggle automated demo loop on/off)");
     Serial.println("                    status, help / ?");
+    Serial.println("  Bluetooth / BLE:  scan (start BLE scan for Stadia/gamepad)");
+    Serial.println("                    ble (print BLE connection status)");
     Serial.println("==========================================================\n");
 }
 
@@ -361,6 +367,10 @@ static void processSerialCLI(unsigned long currentMs) {
                 }
             } else if (strcmp(p, "status") == 0) {
                 printControllerState();
+            } else if (strcmp(p, "scan") == 0) {
+                ble_gamepad_start_scan();
+            } else if (strcmp(p, "ble") == 0) {
+                ble_gamepad_print_status();
             } else {
                 Serial.printf("[CLI] Unknown command: '%s'. Type 'help' for command list.\n", p);
             }
@@ -372,6 +382,12 @@ static void processSerialCLI(unsigned long currentMs) {
 
 void loop() {
     unsigned long currentMs = millis();
+
+    // 1. Process BLE Gamepad host scanning & incoming packet notifications
+    ble_gamepad_loop();
+
+    // 2. Process Interactive Serial CLI (always responsive)
+    processSerialCLI(currentMs);
 
     // Check USB connection state & handle authentic PS3 pairing sequence
     static unsigned long s_connectedTime = 0;
@@ -425,9 +441,6 @@ void loop() {
                 Serial.println("[MAIN] Type 'help' or '?' for command list. Demo loop is DISABLED.");
             }
         } else {
-            // Controller active: process Interactive Serial CLI
-            processSerialCLI(currentMs);
-
             // Optional automated demo loop (only if toggled ON via 'demo' command)
             if (s_demoEnabled) {
                 updateAutomatedTestSequence(currentMs);
