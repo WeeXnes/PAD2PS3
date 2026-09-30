@@ -133,6 +133,12 @@ public:
             buffer[0] = 0xF5;
             return copy_len;
         }
+        // Respond to ANY requested report ID with valid payload so TinyUSB never stalls
+        if (reqlen > 0) {
+            memset(buffer, 0, reqlen);
+            buffer[0] = report_id;
+            return reqlen;
+        }
         return 0;
     }
 
@@ -154,12 +160,20 @@ bool usb_hid_init() {
         return true;
     }
 
-    // Configure USB Device metadata
+    // Configure authentic Sony PlayStation 3 Device Metadata matching genuine DS3
     bool vid_ok  = USB.VID(USB_CONTROLLER_VID);
     bool pid_ok  = USB.PID(USB_CONTROLLER_PID);
     bool prod_ok = USB.productName(USB_CONTROLLER_PRODUCT_NAME);
     bool mfr_ok  = USB.manufacturerName(USB_CONTROLLER_MANUFACTURER);
-    bool fw_ok   = USB.firmwareVersion(0x0100);
+    USB.serialNumber("");                 // Genuine PS3 controller has iSerial = 0
+    bool fw_ok   = USB.firmwareVersion(0x0100); // bcdDevice = 1.00
+    USB.usbVersion(0x0200);               // bcdUSB = 2.00
+    USB.usbPower(500);                    // MaxPower = 500mA
+    USB.usbClass(0);                      // bDeviceClass = 0 (Defined at interface level)
+    USB.usbSubClass(0);                   // bDeviceSubClass = 0
+    USB.usbProtocol(0);                   // bDeviceProtocol = 0
+    USB.usbAttributes(0x80);              // bmAttributes = 0x80 (Bus Powered, NOT Self-Powered)
+    USB.webUSB(false);                    // Disable WebUSB to prevent BOS descriptors
 
     if (!s_hid.addDevice(&s_device, sizeof(s_sony_ds3_report_descriptor))) {
         Serial.println("[USB HID] ERROR: addDevice failed!");
@@ -182,6 +196,11 @@ bool usb_hid_ready() {
 
 bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry, uint8_t hat, uint32_t buttons) {
     if (!s_initialized || !((bool)USB)) {
+        return false;
+    }
+
+    // Avoid blocking or queueing when endpoint is still busy with previous report
+    if (!s_hid.ready()) {
         return false;
     }
 

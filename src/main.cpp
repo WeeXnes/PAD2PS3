@@ -186,6 +186,28 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
 void loop() {
     unsigned long currentMs = millis();
 
+    // Check USB connection state & auto-pulse PS button to activate console pairing
+    static unsigned long s_connectedTime = 0;
+    static bool s_psPulsed = false;
+
+    if (usb_hid_ready()) {
+        if (s_connectedTime == 0) {
+            s_connectedTime = currentMs;
+            Serial.println("[MAIN] Host USB connected! Preparing PS button activation pulse...");
+        }
+        if (!s_psPulsed && (currentMs - s_connectedTime >= 800) && (currentMs - s_connectedTime < 1400)) {
+            // Pulse PS button to trigger PS3 console pairing
+            setButton(BTN_PS, true);
+        } else if (!s_psPulsed && (currentMs - s_connectedTime >= 1400)) {
+            setButton(BTN_PS, false);
+            s_psPulsed = true;
+            Serial.println("[MAIN] PS button activation pulse completed! Controller paired.");
+        }
+    } else {
+        s_connectedTime = 0;
+        s_psPulsed = false;
+    }
+
     // Run automated input generator
     updateAutomatedTestSequence(currentMs);
 
