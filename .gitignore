@@ -1,0 +1,16 @@
+# PlatformIO build artifacts
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# CLion and IDE files
+.idea/
+cmake-build-*/
+CMakeListsPrivate.txt
+compile_commands.json
+.cache/
+.clangd/
+
+# System files
+.DS_Store
+Thumbs.db
