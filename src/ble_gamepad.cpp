@@ -103,14 +103,16 @@ static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
     // Map Stadia input directly into active PS3 Controller State
     processStadiaReport(pData, length);
 
-    uint8_t l2 = (length > 7) ? pData[7] : 0;
-    uint8_t r2 = (length > 8) ? pData[8] : 0;
-    uint8_t b1 = (length > 1) ? pData[1] : 0;
-    uint8_t b2 = (length > 2) ? pData[2] : 0;
+    if (getDebugLog()) {
+        uint8_t l2 = (length > 7) ? pData[7] : 0;
+        uint8_t r2 = (length > 8) ? pData[8] : 0;
+        uint8_t b1 = (length > 1) ? pData[1] : 0;
+        uint8_t b2 = (length > 2) ? pData[2] : 0;
 
-    // Print live status
-    Serial.printf("[STADIA -> PS3] DPAD:%u | LX:%3u LY:%3u | RX:%3u RY:%3u | L2:%3u R2:%3u | ACT:0x%02X SYS:0x%02X\n",
-                  pData[0] & 0x0F, pData[3], pData[4], pData[5], pData[6], l2, r2, b2, b1);
+        // Print live status
+        Serial.printf("[STADIA -> PS3] DPAD:%u | LX:%3u LY:%3u | RX:%3u RY:%3u | L2:%3u R2:%3u | ACT:0x%02X SYS:0x%02X\n",
+                      pData[0] & 0x0F, pData[3], pData[4], pData[5], pData[6], l2, r2, b2, b1);
+    }
 
     if (length <= sizeof(s_prevData)) {
         memcpy(s_prevData, pData, length);

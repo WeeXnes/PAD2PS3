@@ -103,5 +103,7 @@ const ControllerState& getControllerState();
 bool hasControllerStateChanged();
 void clearStateChangedFlag();
 void printControllerState();
+void setDebugLog(bool enable);
+bool getDebugLog();
 
 #endif // CONTROLLER_STATE_H

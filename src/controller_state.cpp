@@ -5,6 +5,7 @@
 static ControllerState s_currentState;
 static ControllerState s_lastReportedState;
 static bool s_stateChanged = false;
+static bool s_debugLog = false;
 
 static const char* BUTTON_NAMES[] = {
     "CROSS", "CIRCLE", "SQUARE", "TRIANGLE",
@@ -12,6 +13,14 @@ static const char* BUTTON_NAMES[] = {
     "SELECT", "START", "L3", "R3",
     "PS", "EXTRA1", "EXTRA2", "EXTRA3"
 };
+
+void setDebugLog(bool enable) {
+    s_debugLog = enable;
+}
+
+bool getDebugLog() {
+    return s_debugLog;
+}
 
 void resetControllerState() {
     s_currentState.buttons1 = 0;
@@ -42,8 +51,10 @@ void setButton(uint8_t button, bool pressed) {
                 s_currentState.buttons1 &= ~mask;
             }
             s_stateChanged = true;
-            Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
-                          BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
+            if (s_debugLog) {
+                Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
+                              BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
+            }
         }
     } else if (button < 16) {
         uint8_t bit = button - 8;
@@ -56,8 +67,10 @@ void setButton(uint8_t button, bool pressed) {
                 s_currentState.buttons2 &= ~mask;
             }
             s_stateChanged = true;
-            Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
-                          BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
+            if (s_debugLog) {
+                Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
+                              BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
+            }
         }
     }
 }
@@ -98,7 +111,9 @@ void setDpad(uint8_t dpad_val) {
     if (s_currentState.dpad != dpad_val) {
         s_currentState.dpad = dpad_val;
         s_stateChanged = true;
-        Serial.printf("[CTRL] D-Pad -> %u\n", dpad_val);
+        if (s_debugLog) {
+            Serial.printf("[CTRL] D-Pad -> %u\n", dpad_val);
+        }
     }
 }
 

@@ -204,6 +204,7 @@ static void printCliHelp() {
     Serial.println("                    rx <0-255>   ry <0-255>");
     Serial.println("                    center / reset");
     Serial.println("  Modes & Utility:  demo (toggle automated demo loop on/off)");
+    Serial.println("                    log / debug (toggle live input logging on/off)");
     Serial.println("                    status, help / ?");
     Serial.println("  Bluetooth / BLE:  scan (start BLE scan for Stadia/gamepad)");
     Serial.println("                    ble (print BLE connection status)");
@@ -367,6 +368,10 @@ static void processSerialCLI(unsigned long currentMs) {
                 }
             } else if (strcmp(p, "status") == 0) {
                 printControllerState();
+            } else if (strcmp(p, "log") == 0 || strcmp(p, "debug") == 0) {
+                bool newState = !getDebugLog();
+                setDebugLog(newState);
+                Serial.printf("[CLI] Live input logging: %s (type 'log' to toggle)\n", newState ? "ENABLED" : "DISABLED");
             } else if (strcmp(p, "scan") == 0) {
                 ble_gamepad_start_scan();
             } else if (strcmp(p, "ble") == 0) {
