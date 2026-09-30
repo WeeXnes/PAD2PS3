@@ -44,8 +44,6 @@ void setButton(uint8_t button, bool pressed) {
             s_stateChanged = true;
             Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
                           BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
-            Serial0.printf("[CTRL] Button %s (idx %u) -> %s\n",
-                           BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
         }
     } else if (button < 16) {
         uint8_t bit = button - 8;
@@ -60,8 +58,6 @@ void setButton(uint8_t button, bool pressed) {
             s_stateChanged = true;
             Serial.printf("[CTRL] Button %s (idx %u) -> %s\n",
                           BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
-            Serial0.printf("[CTRL] Button %s (idx %u) -> %s\n",
-                           BUTTON_NAMES[button], button, pressed ? "PRESSED" : "RELEASED");
         }
     }
 }
@@ -103,7 +99,6 @@ void setDpad(uint8_t dpad_val) {
         s_currentState.dpad = dpad_val;
         s_stateChanged = true;
         Serial.printf("[CTRL] D-Pad -> %u\n", dpad_val);
-        Serial0.printf("[CTRL] D-Pad -> %u\n", dpad_val);
     }
 }
 
@@ -153,5 +148,4 @@ void printControllerState() {
              s_currentState.rightX, s_currentState.rightY,
              s_currentState.L2, s_currentState.R2);
     Serial.print(buf);
-    Serial0.print(buf);
 }

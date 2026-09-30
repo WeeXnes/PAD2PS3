@@ -14,8 +14,8 @@
  */
 #define USB_CONTROLLER_VID          0x054C
 #define USB_CONTROLLER_PID          0x0268
-#define USB_CONTROLLER_PRODUCT_NAME "DualShock 3 Compatible Controller"
-#define USB_CONTROLLER_MANUFACTURER "Sony Interactive Entertainment"
+#define USB_CONTROLLER_PRODUCT_NAME "PLAYSTATION(R)3 Controller"
+#define USB_CONTROLLER_MANUFACTURER "Sony"
 
 /**
  * Genuine Sony PS3 49-Byte Native Report Layout

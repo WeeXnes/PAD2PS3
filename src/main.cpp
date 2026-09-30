@@ -11,7 +11,6 @@ static int s_lastActivePhase = -1;
 
 void logMsg(const char* msg) {
     Serial.println(msg);
-    Serial0.println(msg);
 }
 
 // Button test list (13 buttons)
@@ -34,22 +33,19 @@ static const size_t NUM_TEST_BUTTONS = sizeof(TEST_BUTTONS) / sizeof(TEST_BUTTON
 
 void setup() {
     // Hardware UART on GPIO 43/44 (connected to the board's "UART" Type-C port)
-    Serial0.begin(115200);
-
-    // Native USB CDC port (connected to the board's "USB" Type-C port)
     Serial.begin(115200);
 
     // 1. Initialize controller state to neutral
     initControllerState();
 
-    // 2. Initialize Native USB HID stack (USBHIDGamepad)
+    // 2. Initialize Native USB HID stack (sets Sony VID 0x054C, PID 0x0268, and begins USB)
     usb_hid_init();
 
     delay(300);
 
     logMsg("==================================================");
     logMsg("ESP32-S3 PS3 Controller Emulator");
-    logMsg("Firmware Version: 1.3.0 (USBHIDGamepad Verified)");
+    logMsg("Identity: Sony PLAYSTATION(R)3 Controller");
     logMsg("==================================================");
     logMsg("USB HID initialized successfully");
 
@@ -92,7 +88,6 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
         resetControllerState();
         s_lastActivePhase = currentPhase;
         Serial.printf("[MAIN] Transitioning to Test Phase %d\n", currentPhase);
-        Serial0.printf("[MAIN] Transitioning to Test Phase %d\n", currentPhase);
     }
 
     if (currentPhase == 1) {
