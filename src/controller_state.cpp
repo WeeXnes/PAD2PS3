@@ -103,11 +103,10 @@ void setDpad(uint8_t dpad_val) {
 }
 
 static inline int8_t to_int8_axis(uint8_t val) {
-    // Maps 0..255 -> -127..127
-    if (val == 0) return -127;
+    // Maps 0..255 -> -128..127
     int res = (int)val - 128;
     if (res > 127) res = 127;
-    if (res < -127) res = -127;
+    if (res < -128) res = -128;
     return (int8_t)res;
 }
 

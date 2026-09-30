@@ -17,60 +17,78 @@ static void onScanEnded(NimBLEScanResults results) {
 }
 
 /**
- * Maps the 10-byte Google Stadia BLE input report directly into the PS3 controller state.
+ * Maps the Google Stadia BLE input report directly into the PS3 controller state.
+ * Verified with live Wireshark HID descriptor and hardware calibration dumps:
  *
  * Byte 0: D-Pad Hat Switch (0=Up, 1=Up-Right, 2=Right, ..., 7=Up-Left, 8=Centered)
- * Byte 1: Left Trigger (L2) analog (0..255)
- * Byte 2: Right Trigger (R2) analog (0..255)
- * Byte 3: Left Stick X (0..255, 128=center)
- * Byte 4: Left Stick Y (0..255, 128=center)
+ * Byte 1: System Buttons & Stick Clicks (Low Byte):
+ *         bit 7: R3 (Right Stick Click)
+ *         bit 6: Options / Select
+ *         bit 5: Menu / Start
+ *         bit 4: Stadia Logo / PS Button
+ *         bit 3: Assistant Button
+ *         bit 2: Capture Button
+ *         bit 1: L2 digital click
+ *         bit 0: R2 digital click
+ * Byte 2: Action Buttons & Bumpers (High Byte):
+ *         bit 6: A / Cross
+ *         bit 5: B / Circle
+ *         bit 4: X / Square
+ *         bit 3: Y / Triangle
+ *         bit 2: L1 Bumper
+ *         bit 1: R1 Bumper
+ *         bit 0: L3 (Left Stick Click)
+ * Byte 3: Left Stick X  (0..255, 128=center)
+ * Byte 4: Left Stick Y  (0..255, 128=center)
  * Byte 5: Right Stick X (0..255, 128=center)
  * Byte 6: Right Stick Y (0..255, 128=center)
- * Byte 7: Extra analog / reserved
- * Byte 8: Action Buttons (A=0x01, B=0x02, X=0x04, Y=0x08, L1=0x10, R1=0x20, L3=0x40, R3=0x80)
- * Byte 9: System Buttons (Options=0x01, Menu=0x02, Stadia=0x04, Assistant=0x08, Capture=0x10)
+ * Byte 7: Left Trigger (L2) analog (0..255)
+ * Byte 8: Right Trigger (R2) analog (0..255)
+ * Byte 9: Consumer / Media Buttons (if present)
  */
 static void processStadiaReport(const uint8_t* pData, size_t length) {
-    if (length < 10) return;
+    if (length < 7) return;
 
     // 1. D-Pad Hat Switch (Byte 0)
-    uint8_t hat = pData[0];
+    uint8_t hat = pData[0] & 0x0F;
     if (hat <= 7) {
         setDpad(hat + 1); // 0..7 -> 1..8 (DPAD_UP..DPAD_UP_LEFT)
     } else {
         setDpad(DPAD_CENTERED);
     }
 
-    // 2. Analog Triggers L2 & R2 (Bytes 1 & 2)
-    uint8_t l2 = pData[1];
-    uint8_t r2 = pData[2];
-    setAxis(AXIS_L2, l2);
-    setAxis(AXIS_R2, r2);
-    setButton(BTN_L2_DIGITAL, l2 > 30);
-    setButton(BTN_R2_DIGITAL, r2 > 30);
+    // 2. Action Buttons & Bumpers & L3 (Byte 2)
+    uint8_t b2 = pData[2];
+    setButton(BTN_CROSS,    (b2 & (1 << 6)) != 0); // A -> Cross
+    setButton(BTN_CIRCLE,   (b2 & (1 << 5)) != 0); // B -> Circle
+    setButton(BTN_SQUARE,   (b2 & (1 << 4)) != 0); // X -> Square
+    setButton(BTN_TRIANGLE, (b2 & (1 << 3)) != 0); // Y -> Triangle
+    setButton(BTN_L1,       (b2 & (1 << 2)) != 0); // L1 Bumper
+    setButton(BTN_R1,       (b2 & (1 << 1)) != 0); // R1 Bumper
+    setButton(BTN_L3,       (b2 & (1 << 0)) != 0); // L3 (Left Stick Click)
 
-    // 3. Analog Sticks (Bytes 3..6)
+    // 3. System Buttons & R3 & Clicks (Byte 1)
+    uint8_t b1 = pData[1];
+    setButton(BTN_R3,     (b1 & (1 << 7)) != 0); // R3 (Right Stick Click)
+    setButton(BTN_SELECT, (b1 & (1 << 6)) != 0); // Options (...) -> Select
+    setButton(BTN_START,  (b1 & (1 << 5)) != 0); // Menu (hamburger) -> Start
+    setButton(BTN_PS,     (b1 & (1 << 4)) != 0); // Stadia Logo -> PS Button
+    setButton(BTN_EXTRA1, (b1 & (1 << 3)) != 0); // Assistant
+    setButton(BTN_EXTRA2, (b1 & (1 << 2)) != 0); // Capture
+
+    // 4. Analog Sticks (Bytes 3..6)
     setAxis(AXIS_LEFT_X,  pData[3]);
     setAxis(AXIS_LEFT_Y,  pData[4]);
     setAxis(AXIS_RIGHT_X, pData[5]);
     setAxis(AXIS_RIGHT_Y, pData[6]);
 
-    // 4. Action Buttons & Bumpers & Stick Clicks (Byte 8)
-    uint8_t b8 = pData[8];
-    setButton(BTN_CROSS,    (b8 & (1 << 0)) != 0); // A -> Cross
-    setButton(BTN_CIRCLE,   (b8 & (1 << 1)) != 0); // B -> Circle
-    setButton(BTN_SQUARE,   (b8 & (1 << 2)) != 0); // X -> Square
-    setButton(BTN_TRIANGLE, (b8 & (1 << 3)) != 0); // Y -> Triangle
-    setButton(BTN_L1,       (b8 & (1 << 4)) != 0); // L1
-    setButton(BTN_R1,       (b8 & (1 << 5)) != 0); // R1
-    setButton(BTN_L3,       (b8 & (1 << 6)) != 0); // L3 (Left Click)
-    setButton(BTN_R3,       (b8 & (1 << 7)) != 0); // R3 (Right Click)
-
-    // 5. System Buttons (Byte 9)
-    uint8_t b9 = pData[9];
-    setButton(BTN_SELECT, (b9 & (1 << 0)) != 0); // Options (...) -> Select
-    setButton(BTN_START,  (b9 & (1 << 1)) != 0); // Menu (hamburger) -> Start
-    setButton(BTN_PS,     (b9 & (1 << 2)) != 0); // Stadia Logo -> PS Button
+    // 5. Analog Triggers L2 & R2 (Bytes 7 & 8)
+    uint8_t l2 = (length > 7) ? pData[7] : 0;
+    uint8_t r2 = (length > 8) ? pData[8] : 0;
+    setAxis(AXIS_L2, l2);
+    setAxis(AXIS_R2, r2);
+    setButton(BTN_L2_DIGITAL, (l2 > 30) || ((b1 & (1 << 1)) != 0));
+    setButton(BTN_R2_DIGITAL, (r2 > 30) || ((b1 & (1 << 0)) != 0));
 }
 
 static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
@@ -85,9 +103,14 @@ static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
     // Map Stadia input directly into active PS3 Controller State
     processStadiaReport(pData, length);
 
+    uint8_t l2 = (length > 7) ? pData[7] : 0;
+    uint8_t r2 = (length > 8) ? pData[8] : 0;
+    uint8_t b1 = (length > 1) ? pData[1] : 0;
+    uint8_t b2 = (length > 2) ? pData[2] : 0;
+
     // Print live status
-    Serial.printf("[STADIA -> PS3] DPAD:%u | LX:%3u LY:%3u | RX:%3u RY:%3u | L2:%3u R2:%3u | B8:0x%02X B9:0x%02X\n",
-                  pData[0], pData[3], pData[4], pData[5], pData[6], pData[1], pData[2], pData[8], pData[9]);
+    Serial.printf("[STADIA -> PS3] DPAD:%u | LX:%3u LY:%3u | RX:%3u RY:%3u | L2:%3u R2:%3u | ACT:0x%02X SYS:0x%02X\n",
+                  pData[0] & 0x0F, pData[3], pData[4], pData[5], pData[6], l2, r2, b2, b1);
 
     if (length <= sizeof(s_prevData)) {
         memcpy(s_prevData, pData, length);
