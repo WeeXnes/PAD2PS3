@@ -5,6 +5,9 @@
 static NimBLEAddress s_targetAddress;
 static std::string s_targetName = "";
 static NimBLEClient* s_pClient = nullptr;
+static NimBLERemoteCharacteristic* s_pRumbleChar = nullptr;
+static uint16_t s_lastRumbleLeft = 0;
+static uint16_t s_lastRumbleRight = 0;
 static bool s_doConnect = false;
 static bool s_connected = false;
 static bool s_isScanning = false;
@@ -128,6 +131,9 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     void onDisconnect(NimBLEClient* pClient) override {
         s_connected = false;
         s_prevLen = 0;
+        s_pRumbleChar = nullptr;
+        s_lastRumbleLeft = 0;
+        s_lastRumbleRight = 0;
         resetControllerState(); // Release all inputs on disconnect
         Serial.println("[BLE] Disconnected from BLE gamepad!");
         Serial.println("[BLE] Resuming scan in 1 second...");
@@ -270,12 +276,14 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
         return false;
     }
 
-    Serial.println("[BLE] HID Service found! Discovering input report characteristics...");
+    Serial.println("[BLE] HID Service found! Discovering input & output characteristics...");
     auto chars = pHidService->getCharacteristics(true);
     int subscribedCount = 0;
+    s_pRumbleChar = nullptr;
 
     if (chars) {
         for (auto chr : *chars) {
+            // Subscribe to Input Reports
             if (chr->canNotify()) {
                 Serial.printf("[BLE] Subscribing to HID Report Char %s (handle 0x%04X)...\n",
                               chr->getUUID().toString().c_str(), chr->getHandle());
@@ -286,6 +294,26 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
                     Serial.println("[BLE] -> Subscription failed!");
                 }
             }
+
+            // Discover Haptic / Rumble Output Report (Report ID 5 on Stadia)
+            if (chr->canWrite() || chr->canWriteNoResponse()) {
+                NimBLERemoteDescriptor* pDesc = chr->getDescriptor(NimBLEUUID((uint16_t)0x2908));
+                if (pDesc) {
+                    std::string descVal = pDesc->readValue();
+                    if (descVal.length() >= 2) {
+                        uint8_t repId = (uint8_t)descVal[0];
+                        uint8_t repType = (uint8_t)descVal[1];
+                        Serial.printf("[BLE] Writable Char %s (handle 0x%04X) -> Report ID 0x%02X, Type 0x%02X\n",
+                                      chr->getUUID().toString().c_str(), chr->getHandle(), repId, repType);
+                        if (repId == 0x05) {
+                            s_pRumbleChar = chr;
+                            Serial.println("[BLE] -> MATCHED Stadia Haptic Output (Report ID 5)!");
+                        }
+                    }
+                } else if (!s_pRumbleChar) {
+                    s_pRumbleChar = chr;
+                }
+            }
         }
     }
 
@@ -293,9 +321,12 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
     if (s_connected) {
         s_pClient = pClient;
         s_prevLen = 0;
+        s_lastRumbleLeft = 0;
+        s_lastRumbleRight = 0;
         Serial.println("==================================================");
         Serial.println("[BLE] *** STADIA CONTROLLER MAPPED DIRECTLY TO PS3! ***");
         Serial.printf("[BLE] Device: %s (%s)\n", name.c_str(), address.toString().c_str());
+        Serial.printf("[BLE] Haptic/Rumble Feedback: %s\n", s_pRumbleChar ? "SUPPORTED (Active)" : "NOT FOUND");
         Serial.println("[BLE] Wireless inputs are now actively driving PS3 DualShock 3!");
         Serial.println("==================================================");
     } else {
@@ -304,6 +335,46 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
     }
 
     return s_connected;
+}
+
+void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor) {
+    if (!s_connected || s_pRumbleChar == nullptr) {
+        return;
+    }
+
+    // Convert PS3 motor values to Stadia 16-bit values (0..65534):
+    // big_motor (left): heavy low-frequency motor, 0..255
+    uint32_t l_scaled = (uint32_t)big_motor * 257;
+    if (l_scaled > 65534) l_scaled = 65534;
+    uint16_t left_16 = (uint16_t)l_scaled;
+
+    // small_motor (right): light high-frequency motor, 0 or 1 on PS3 (or 0..255)
+    uint16_t right_16 = 0;
+    if (small_motor > 0) {
+        uint32_t r_scaled = (small_motor == 1) ? 65534 : ((uint32_t)small_motor * 257);
+        if (r_scaled > 65534) r_scaled = 65534;
+        right_16 = (uint16_t)r_scaled;
+    }
+
+    // Suppress redundant writes to prevent flooding BLE link
+    if (left_16 == s_lastRumbleLeft && right_16 == s_lastRumbleRight) {
+        return;
+    }
+    s_lastRumbleLeft = left_16;
+    s_lastRumbleRight = right_16;
+
+    // 4-byte PID Output Report payload: [left_lo, left_hi, right_lo, right_hi]
+    uint8_t payload[4];
+    payload[0] = (uint8_t)(left_16 & 0xFF);
+    payload[1] = (uint8_t)((left_16 >> 8) & 0xFF);
+    payload[2] = (uint8_t)(right_16 & 0xFF);
+    payload[3] = (uint8_t)((right_16 >> 8) & 0xFF);
+
+    bool noResponse = s_pRumbleChar->canWriteNoResponse();
+    bool ok = s_pRumbleChar->writeValue(payload, sizeof(payload), !noResponse);
+    if (!ok && noResponse) {
+        s_pRumbleChar->writeValue(payload, sizeof(payload), true);
+    }
 }
 
 void ble_gamepad_loop() {

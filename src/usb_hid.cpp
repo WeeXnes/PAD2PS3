@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "USB.h"
 #include "USBHID.h"
+#include "ble_gamepad.h"
 
 // ---------------------------------------------------------------------------
 // Official Sony PlayStation 3 DualShock 3 HID Report Descriptor
@@ -300,6 +301,24 @@ public:
 
 private:
     void handleOutputReport(const uint8_t* buffer, uint16_t len) {
+        if (len >= 5) {
+            // PS3 DualShock 3 Output Report (Report 0x01):
+            // buffer[0]: 0x00 padding
+            // buffer[1]: Right motor duration
+            // buffer[2]: Right motor on/off (small motor: 0 or 1)
+            // buffer[3]: Left motor duration
+            // buffer[4]: Left motor power (big motor: 0..255)
+            uint8_t r_dur = buffer[1];
+            uint8_t r_pwr = buffer[2];
+            uint8_t l_dur = buffer[3];
+            uint8_t l_pwr = buffer[4];
+
+            uint8_t small_motor = (r_dur > 0 && r_pwr > 0) ? r_pwr : 0;
+            uint8_t big_motor   = (l_dur > 0) ? l_pwr : 0;
+
+            ble_gamepad_set_rumble(small_motor, big_motor);
+        }
+
         if (len >= 10) {
             uint8_t led_field = buffer[9];
             uint8_t leds = (led_field >> 1) & 0x0F;

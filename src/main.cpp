@@ -192,6 +192,7 @@ static int8_t s_activeTapButton = -1;
 static uint8_t s_activeTapDpad = 0;
 static bool s_activeTapTriggerL2 = false;
 static bool s_activeTapTriggerR2 = false;
+static bool s_activeTapRumble = false;
 
 static void printCliHelp() {
     Serial.println("\n=================== PS3 CONTROLLER CLI ===================");
@@ -205,6 +206,7 @@ static void printCliHelp() {
     Serial.println("                    center / reset");
     Serial.println("  Modes & Utility:  demo (toggle automated demo loop on/off)");
     Serial.println("                    log / debug (toggle live input logging on/off)");
+    Serial.println("                    rumble [0-255] (pulse controller vibration motors)");
     Serial.println("                    status, help / ?");
     Serial.println("  Bluetooth / BLE:  scan (start BLE scan for Stadia/gamepad)");
     Serial.println("                    ble (print BLE connection status)");
@@ -257,6 +259,10 @@ static void processSerialCLI(unsigned long currentMs) {
             setAxis(AXIS_R2, 0);
             setButton(BTN_R2_DIGITAL, false);
             s_activeTapTriggerR2 = false;
+        }
+        if (s_activeTapRumble) {
+            ble_gamepad_set_rumble(0, 0);
+            s_activeTapRumble = false;
         }
         s_autoReleaseMs = 0;
     }
@@ -372,6 +378,20 @@ static void processSerialCLI(unsigned long currentMs) {
                 bool newState = !getDebugLog();
                 setDebugLog(newState);
                 Serial.printf("[CLI] Live input logging: %s (type 'log' to toggle)\n", newState ? "ENABLED" : "DISABLED");
+            } else if (strncmp(p, "rumble", 6) == 0) {
+                int pwr = 255;
+                if (strlen(p) > 6) {
+                    char* arg = p + 6;
+                    while (*arg == ' ') arg++;
+                    if (*arg) {
+                        pwr = atoi(arg);
+                        if (pwr < 0) pwr = 0; else if (pwr > 255) pwr = 255;
+                    }
+                }
+                ble_gamepad_set_rumble(pwr > 0 ? 1 : 0, (uint8_t)pwr);
+                s_autoReleaseMs = currentMs + 500;
+                s_activeTapRumble = true;
+                Serial.printf("[CLI] Rumble pulse triggered at power %d (500ms)\n", pwr);
             } else if (strcmp(p, "scan") == 0) {
                 ble_gamepad_start_scan();
             } else if (strcmp(p, "ble") == 0) {

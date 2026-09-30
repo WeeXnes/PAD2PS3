@@ -15,3 +15,4 @@ void ble_gamepad_loop();
 bool ble_gamepad_is_connected();
 void ble_gamepad_start_scan();
 void ble_gamepad_print_status();
+void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor);
