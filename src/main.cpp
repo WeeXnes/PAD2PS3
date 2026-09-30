@@ -179,6 +179,190 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Interactive Serial CLI State
+// ---------------------------------------------------------------------------
+static bool s_demoEnabled = false; // Automated demo disabled by default
+static unsigned long s_autoReleaseMs = 0;
+static int8_t s_activeTapButton = -1;
+static uint8_t s_activeTapDpad = 0;
+static bool s_activeTapTriggerL2 = false;
+static bool s_activeTapTriggerR2 = false;
+
+static void printCliHelp() {
+    Serial.println("\n=================== PS3 CONTROLLER CLI ===================");
+    Serial.println("  Action Buttons:   x (cross), o (circle), s (square), t (triangle)");
+    Serial.println("  D-Pad:            u (up), d (down), l (left), r (right)");
+    Serial.println("  Shoulders:        l1, r1, l2, r2, l3, r3");
+    Serial.println("  System:           ps (tap), pshold (hold), psrel (release)");
+    Serial.println("                    start, select");
+    Serial.println("  Analog Sticks:    lx <0-255>   ly <0-255>");
+    Serial.println("                    rx <0-255>   ry <0-255>");
+    Serial.println("                    center / reset");
+    Serial.println("  Modes & Utility:  demo (toggle automated demo loop on/off)");
+    Serial.println("                    status, help / ?");
+    Serial.println("==========================================================\n");
+}
+
+static void triggerButtonTap(uint8_t btn, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
+    resetControllerState();
+    setButton(btn, true);
+    s_activeTapButton = btn;
+    s_autoReleaseMs = currentMs + durationMs;
+    Serial.printf("[CLI] Tapped: %s\n", name);
+}
+
+static void triggerDpadTap(uint8_t dir, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
+    resetControllerState();
+    setDpad(dir);
+    s_activeTapDpad = dir;
+    s_autoReleaseMs = currentMs + durationMs;
+    Serial.printf("[CLI] Tapped D-Pad: %s\n", name);
+}
+
+static void triggerTriggerTap(uint8_t axis, uint8_t btn, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
+    resetControllerState();
+    setAxis(axis, 255);
+    setButton(btn, true);
+    if (axis == AXIS_L2) s_activeTapTriggerL2 = true;
+    else s_activeTapTriggerR2 = true;
+    s_autoReleaseMs = currentMs + durationMs;
+    Serial.printf("[CLI] Tapped: %s\n", name);
+}
+
+static void processSerialCLI(unsigned long currentMs) {
+    // 1. Handle auto-release timers for tapped buttons / D-Pad
+    if (s_autoReleaseMs > 0 && currentMs >= s_autoReleaseMs) {
+        if (s_activeTapButton >= 0) {
+            setButton(s_activeTapButton, false);
+            s_activeTapButton = -1;
+        }
+        if (s_activeTapDpad != 0) {
+            setDpad(DPAD_CENTERED);
+            s_activeTapDpad = 0;
+        }
+        if (s_activeTapTriggerL2) {
+            setAxis(AXIS_L2, 0);
+            setButton(BTN_L2_DIGITAL, false);
+            s_activeTapTriggerL2 = false;
+        }
+        if (s_activeTapTriggerR2) {
+            setAxis(AXIS_R2, 0);
+            setButton(BTN_R2_DIGITAL, false);
+            s_activeTapTriggerR2 = false;
+        }
+        s_autoReleaseMs = 0;
+    }
+
+    // 2. Read incoming serial command lines
+    static char cmdBuf[64];
+    static size_t cmdLen = 0;
+
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\r' || c == '\n') {
+            if (cmdLen == 0) continue;
+            cmdBuf[cmdLen] = '\0';
+            cmdLen = 0;
+
+            // Trim leading spaces
+            char* p = cmdBuf;
+            while (*p == ' ') p++;
+            // Convert to lowercase
+            for (char* s = p; *s; s++) {
+                if (*s >= 'A' && *s <= 'Z') *s += 32;
+            }
+
+            // Command dispatch
+            if (strcmp(p, "help") == 0 || strcmp(p, "?") == 0) {
+                printCliHelp();
+            } else if (strcmp(p, "x") == 0 || strcmp(p, "cross") == 0 || strcmp(p, "k") == 0) {
+                triggerButtonTap(BTN_CROSS, "CROSS", currentMs);
+            } else if (strcmp(p, "o") == 0 || strcmp(p, "circle") == 0 || strcmp(p, "c") == 0 || strcmp(p, "j") == 0) {
+                triggerButtonTap(BTN_CIRCLE, "CIRCLE", currentMs);
+            } else if (strcmp(p, "s") == 0 || strcmp(p, "square") == 0 || strcmp(p, "sq") == 0 || strcmp(p, "h") == 0) {
+                triggerButtonTap(BTN_SQUARE, "SQUARE", currentMs);
+            } else if (strcmp(p, "t") == 0 || strcmp(p, "triangle") == 0 || strcmp(p, "tri") == 0 || strcmp(p, "y") == 0) {
+                triggerButtonTap(BTN_TRIANGLE, "TRIANGLE", currentMs);
+            } else if (strcmp(p, "u") == 0 || strcmp(p, "up") == 0 || strcmp(p, "w") == 0) {
+                triggerDpadTap(DPAD_UP, "UP", currentMs);
+            } else if (strcmp(p, "d") == 0 || strcmp(p, "down") == 0) {
+                triggerDpadTap(DPAD_DOWN, "DOWN", currentMs);
+            } else if (strcmp(p, "l") == 0 || strcmp(p, "left") == 0 || strcmp(p, "a") == 0) {
+                triggerDpadTap(DPAD_LEFT, "LEFT", currentMs);
+            } else if (strcmp(p, "r") == 0 || strcmp(p, "right") == 0) {
+                triggerDpadTap(DPAD_RIGHT, "RIGHT", currentMs);
+            } else if (strcmp(p, "l1") == 0) {
+                triggerButtonTap(BTN_L1, "L1", currentMs);
+            } else if (strcmp(p, "r1") == 0) {
+                triggerButtonTap(BTN_R1, "R1", currentMs);
+            } else if (strcmp(p, "l2") == 0) {
+                triggerTriggerTap(AXIS_L2, BTN_L2_DIGITAL, "L2", currentMs);
+            } else if (strcmp(p, "r2") == 0) {
+                triggerTriggerTap(AXIS_R2, BTN_R2_DIGITAL, "R2", currentMs);
+            } else if (strcmp(p, "l3") == 0) {
+                triggerButtonTap(BTN_L3, "L3 (Stick Click)", currentMs);
+            } else if (strcmp(p, "r3") == 0) {
+                triggerButtonTap(BTN_R3, "R3 (Stick Click)", currentMs);
+            } else if (strcmp(p, "start") == 0 || strcmp(p, "st") == 0) {
+                triggerButtonTap(BTN_START, "START", currentMs);
+            } else if (strcmp(p, "select") == 0 || strcmp(p, "sel") == 0) {
+                triggerButtonTap(BTN_SELECT, "SELECT", currentMs);
+            } else if (strcmp(p, "ps") == 0 || strcmp(p, "home") == 0) {
+                triggerButtonTap(BTN_PS, "PS (pulse)", currentMs, 200);
+            } else if (strcmp(p, "pshold") == 0) {
+                setButton(BTN_PS, true);
+                s_autoReleaseMs = 0; // Don't auto-release
+                Serial.println("[CLI] Button PS HELD DOWN (type 'psrel' to release)");
+            } else if (strcmp(p, "psrel") == 0) {
+                setButton(BTN_PS, false);
+                Serial.println("[CLI] Button PS RELEASED");
+            } else if (strncmp(p, "lx ", 3) == 0) {
+                int val = atoi(p + 3);
+                if (val < 0) val = 0; else if (val > 255) val = 255;
+                setAxis(AXIS_LEFT_X, (uint8_t)val);
+                Serial.printf("[CLI] Left Stick X set to %d\n", val);
+            } else if (strncmp(p, "ly ", 3) == 0) {
+                int val = atoi(p + 3);
+                if (val < 0) val = 0; else if (val > 255) val = 255;
+                setAxis(AXIS_LEFT_Y, (uint8_t)val);
+                Serial.printf("[CLI] Left Stick Y set to %d\n", val);
+            } else if (strncmp(p, "rx ", 3) == 0) {
+                int val = atoi(p + 3);
+                if (val < 0) val = 0; else if (val > 255) val = 255;
+                setAxis(AXIS_RIGHT_X, (uint8_t)val);
+                Serial.printf("[CLI] Right Stick X set to %d\n", val);
+            } else if (strncmp(p, "ry ", 3) == 0) {
+                int val = atoi(p + 3);
+                if (val < 0) val = 0; else if (val > 255) val = 255;
+                setAxis(AXIS_RIGHT_Y, (uint8_t)val);
+                Serial.printf("[CLI] Right Stick Y set to %d\n", val);
+            } else if (strcmp(p, "center") == 0 || strcmp(p, "neutral") == 0 || strcmp(p, "reset") == 0) {
+                resetControllerState();
+                s_autoReleaseMs = 0;
+                Serial.println("[CLI] All inputs reset to neutral");
+            } else if (strcmp(p, "demo") == 0 || strcmp(p, "auto") == 0) {
+                s_demoEnabled = !s_demoEnabled;
+                resetControllerState();
+                s_autoReleaseMs = 0;
+                if (s_demoEnabled) {
+                    s_sequenceStartTime = currentMs;
+                    s_lastActivePhase = -1;
+                    Serial.println("[CLI] Automated demo loop: ENABLED (type 'demo' to disable)");
+                } else {
+                    Serial.println("[CLI] Automated demo loop: DISABLED (controller in neutral standby)");
+                }
+            } else if (strcmp(p, "status") == 0) {
+                printControllerState();
+            } else {
+                Serial.printf("[CLI] Unknown command: '%s'. Type 'help' for command list.\n", p);
+            }
+        } else if (cmdLen < sizeof(cmdBuf) - 1) {
+            cmdBuf[cmdLen++] = c;
+        }
+    }
+}
+
 void loop() {
     unsigned long currentMs = millis();
 
@@ -230,24 +414,31 @@ void loop() {
                 setButton(BTN_PS, false);
                 s_pairingPulseDone = true;
                 s_sequenceStartTime = currentMs;
-                Serial.println("[MAIN] Controller paired & active! Starting automated test loop.");
+                Serial.println("[MAIN] Controller paired & active! Interactive Serial CLI ready.");
+                Serial.println("[MAIN] Type 'help' or '?' for command list. Demo loop is DISABLED.");
             }
         } else {
-            // Pairing pulse complete, run automated test loop
-            updateAutomatedTestSequence(currentMs);
+            // Controller active: process Interactive Serial CLI
+            processSerialCLI(currentMs);
+
+            // Optional automated demo loop (only if toggled ON via 'demo' command)
+            if (s_demoEnabled) {
+                updateAutomatedTestSequence(currentMs);
+            }
         }
 
         // Send HID Report at designated interval (100Hz = 10ms)
         if (currentMs - s_lastReportTime >= REPORT_INTERVAL_MS) {
             s_lastReportTime = currentMs;
-
             sendReport();
 
-            // Print debug status every 500ms
-            static unsigned long s_lastDebugPrint = 0;
-            if (currentMs - s_lastDebugPrint >= 500) {
-                s_lastDebugPrint = currentMs;
-                printControllerState();
+            // Only print periodic debug state if automated demo loop is enabled
+            if (s_demoEnabled) {
+                static unsigned long s_lastDebugPrint = 0;
+                if (currentMs - s_lastDebugPrint >= 500) {
+                    s_lastDebugPrint = currentMs;
+                    printControllerState();
+                }
             }
         }
     } else {
