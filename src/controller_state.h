@@ -25,9 +25,9 @@ enum ControllerButton : uint8_t {
     BTN_L3          = 10, // Left Thumbstick Click
     BTN_R3          = 11, // Right Thumbstick Click
     BTN_PS          = 12, // PS (Home / Guide) Button
-    BTN_EXTRA1      = 13, // Reserved / Future use
-    BTN_EXTRA2      = 14,
-    BTN_EXTRA3      = 15
+    BTN_EXTRA1      = 13, // Stadia Assistant / Extra 1
+    BTN_EXTRA2      = 14, // Stadia Capture / Extra 2
+    BTN_EXTRA3      = 15  // Reserved / Extra 3
 };
 
 /**
@@ -62,7 +62,7 @@ enum ControllerAxis : uint8_t {
 
 /**
  * Internal Controller State representation
- * Exactly matches the 9-byte HID report payload layout:
+ * Exactly matches the 9-byte logical state layout:
  * - buttons1: bits 0..7
  * - buttons2: bits 8..15
  * - dpad: hat switch 0=centered, 1..8=directions
@@ -92,13 +92,19 @@ struct ControllerState {
 void initControllerState();
 void resetControllerState();
 
-// Required control functions
+// Apply raw hardware gamepad state through active curves, deadzones, and button mappings
+void updateFromRawGamepadState(const ControllerState& raw);
+void reapplyActiveConfigToState();
+
+// Direct control functions (CLI, pairing pulse, automated tests)
 void setButton(uint8_t button, bool pressed);
 void setAxis(uint8_t axis, uint8_t value);
 void setDpad(uint8_t dpad_val);
 void sendReport();
 
-// Query and debugging
+// Thread-safe state snapshots & debugging
+ControllerState getControllerStateCopy();
+ControllerState getRawControllerStateCopy();
 const ControllerState& getControllerState();
 bool hasControllerStateChanged();
 void clearStateChangedFlag();

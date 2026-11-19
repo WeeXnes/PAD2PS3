@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "USB.h"
 #include "USBHID.h"
+#include "tusb.h"
 #include "ble_gamepad.h"
 
 // ---------------------------------------------------------------------------
@@ -151,7 +152,7 @@ static const uint8_t s_ds3_resp_0xF2[64] = {
 };
 
 static const uint8_t s_ds3_resp_0xF5_template[64] = {
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x9E, 0x00, 0x03, 0x50, 0x81, 0xD8, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x9E, 0x00, 0x03, 0x50, 0x81, 0xD8, 01,
     0x8A, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x04,
     0x04, 0x04, 0x04, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x07, 0x00, 0x17, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -187,12 +188,14 @@ static const uint8_t s_ds3_resp_0xF7[64] = {
 
 static uint8_t s_hostMac[6] = {0};
 static bool s_hasHostMac = false;
-static bool s_paired = false;
-static bool s_streamingActive = false;
+static volatile bool s_paired = false;
+static volatile bool s_streamingActive = false;
 static uint8_t s_ef_subcmd = 0xA0;
-static bool s_handshake_features_done = false;
-static int s_lastAssignedPlayer = -1;
+static volatile bool s_handshake_features_done = false;
+static volatile bool s_rehandshake_requested = false;
+static volatile int s_lastAssignedPlayer = 0;
 static uint8_t s_lastLedField = 0;
+static volatile uint32_t s_reportsSent = 0;
 
 class PS3USBHIDDevice : public USBHIDDevice {
 public:
@@ -236,6 +239,12 @@ public:
                 break;
             case 0xF7:
                 src = s_ds3_resp_0xF7;
+                if (s_handshake_features_done) {
+                    // PS3 re-initiated feature handshake (e.g. game launch or mode switch)
+                    s_rehandshake_requested = true;
+                    s_paired = false;
+                    s_streamingActive = false;
+                }
                 s_handshake_features_done = true;
                 Serial.println("[USB HID] *** Handshake features completed (0xF7)! Ready for PS button pulse ***");
                 break;
@@ -244,11 +253,17 @@ public:
         }
 
         if (src) {
-            // Overwrite starting at buffer - 1 (p_epbuf->ctrl[0]) so byte 0 matches
-            // authentic DS3 wire bytes (compensating for TinyUSB's default report_id injection)
-            uint8_t* wire_buf = buffer - 1;
-            memcpy(wire_buf, src, 64);
-            return 63; // 1 + 63 = 64 bytes total sent by tud_control_xfer
+            if (report_id != 0) {
+                // Overwrite starting at buffer - 1 (p_epbuf->ctrl[0]) so byte 0 matches
+                // authentic DS3 wire bytes (compensating for TinyUSB's default report_id injection)
+                uint8_t* wire_buf = buffer - 1;
+                memcpy(wire_buf, src, 64);
+                return (reqlen > 0 && reqlen < 63) ? reqlen : 63;
+            } else {
+                uint16_t copy_len = (reqlen > 0 && reqlen < 64) ? reqlen : 64;
+                memcpy(buffer, src, copy_len);
+                return copy_len;
+            }
         }
 
         if (reqlen > 0) {
@@ -259,8 +274,6 @@ public:
     }
 
     void _onSetFeature(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        // Report 0x01 is periodically sent by the PS3 as a keepalive / LED refresh.
-        // We suppress the raw log for 0x01 to keep the serial CLI clean.
         if (report_id != 0x01) {
             Serial.printf("[USB HID] SET_REPORT (Feature): ID 0x%02X, len %u\n", report_id, len);
         }
@@ -304,9 +317,9 @@ private:
         if (len >= 5) {
             // PS3 DualShock 3 Output Report (Report 0x01):
             // buffer[0]: 0x00 padding
-            // buffer[1]: Right motor duration
+            // buffer[1]: Right motor duration (units ~10ms, 0xFF = continuous)
             // buffer[2]: Right motor on/off (small motor: 0 or 1)
-            // buffer[3]: Left motor duration
+            // buffer[3]: Left motor duration (units ~10ms, 0xFF = continuous)
             // buffer[4]: Left motor power (big motor: 0..255)
             uint8_t r_dur = buffer[1];
             uint8_t r_pwr = buffer[2];
@@ -314,9 +327,16 @@ private:
             uint8_t l_pwr = buffer[4];
 
             uint8_t small_motor = (r_dur > 0 && r_pwr > 0) ? r_pwr : 0;
-            uint8_t big_motor   = (l_dur > 0) ? l_pwr : 0;
+            uint8_t big_motor   = (l_dur > 0 && l_pwr > 0) ? l_pwr : 0;
 
-            ble_gamepad_set_rumble(small_motor, big_motor);
+            uint16_t r_dur_ms = (r_dur == 0xFF) ? 1200 : (uint16_t)(r_dur * 10);
+            uint16_t l_dur_ms = (l_dur == 0xFF) ? 1200 : (uint16_t)(l_dur * 10);
+            if (r_dur_ms > 0 && r_dur_ms < 120) r_dur_ms = 120;
+            if (l_dur_ms > 0 && l_dur_ms < 120) l_dur_ms = 120;
+            if (r_dur_ms > 1500) r_dur_ms = 1500;
+            if (l_dur_ms > 1500) l_dur_ms = 1500;
+
+            ble_gamepad_set_rumble(small_motor, big_motor, r_dur_ms, l_dur_ms);
         }
 
         if (len >= 10) {
@@ -325,7 +345,6 @@ private:
             if (leds != 0) {
                 s_paired = true;
                 int player = (leds & 1) ? 1 : ((leds & 2) ? 2 : ((leds & 4) ? 3 : 4));
-                // Only log if the assigned player or LED field has changed
                 if (player != s_lastAssignedPlayer || led_field != s_lastLedField) {
                     s_lastAssignedPlayer = player;
                     s_lastLedField = led_field;
@@ -353,15 +372,15 @@ bool usb_hid_init() {
     bool pid_ok  = USB.PID(USB_CONTROLLER_PID);
     bool prod_ok = USB.productName(USB_CONTROLLER_PRODUCT_NAME);
     bool mfr_ok  = USB.manufacturerName(USB_CONTROLLER_MANUFACTURER);
-    USB.serialNumber("");                 // Genuine PS3 controller has iSerial = 0
+    USB.serialNumber("");                       // Genuine PS3 controller has iSerial = 0
     bool fw_ok   = USB.firmwareVersion(0x0100); // bcdDevice = 1.00
-    USB.usbVersion(0x0200);               // bcdUSB = 2.00
-    USB.usbPower(500);                    // MaxPower = 500mA
-    USB.usbClass(0);                      // bDeviceClass = 0 (Defined at interface level)
-    USB.usbSubClass(0);                   // bDeviceSubClass = 0
-    USB.usbProtocol(0);                   // bDeviceProtocol = 0
-    USB.usbAttributes(0x80);              // bmAttributes = 0x80 (Bus Powered)
-    USB.webUSB(false);                    // Disable WebUSB to prevent BOS descriptors
+    USB.usbVersion(0x0200);                     // bcdUSB = 2.00
+    USB.usbPower(500);                          // MaxPower = 500mA
+    USB.usbClass(0);                            // bDeviceClass = 0 (Defined at interface level)
+    USB.usbSubClass(0);                         // bDeviceSubClass = 0
+    USB.usbProtocol(0);                         // bDeviceProtocol = 0
+    USB.usbAttributes(0x80);                    // bmAttributes = 0x80 (Bus Powered)
+    USB.webUSB(false);                          // Disable WebUSB to prevent BOS descriptors
 
     if (!s_hid.addDevice(&s_device, sizeof(s_sony_ds3_report_descriptor))) {
         Serial.println("[USB HID] ERROR: addDevice failed!");
@@ -373,12 +392,7 @@ bool usb_hid_init() {
 
     // Critical PS3 Compatibility Fix:
     // PS3 console never requests GET_DESCRIPTOR HID_REPORT (0x22).
-    // In Arduino ESP32 USBHID, device report IDs are ONLY loaded on demand when
-    // tud_hid_descriptor_report_cb() is invoked. Because PS3 never queries it,
-    // tud_hid_descriptor_report_cb() was never called, leaving report_ids empty
-    // and causing TinyUSB to STALL all PS3 feature report queries!
-    // We explicitly call tud_hid_descriptor_report_cb(0) here to parse and register
-    // all report IDs immediately at boot.
+    // Pre-load all report IDs immediately at boot so TinyUSB routes all feature reports.
     uint8_t const* desc = tud_hid_descriptor_report_cb(0);
     Serial.printf("[USB HID] Pre-loaded report map: %p\n", desc);
 
@@ -395,22 +409,21 @@ bool usb_hid_init() {
     return true;
 }
 
-#include "tusb.h"
-
 bool usb_hid_is_mounted() {
     bool m = s_initialized && tud_mounted();
     if (!m) {
         s_handshake_features_done = false;
+        s_rehandshake_requested = false;
         s_streamingActive = false;
         s_paired = false;
-        s_lastAssignedPlayer = -1;
+        s_lastAssignedPlayer = 0;
         s_lastLedField = 0;
     }
     return m;
 }
 
 bool usb_hid_ready() {
-    return usb_hid_is_mounted() && s_hid.ready();
+    return usb_hid_is_mounted() && tud_hid_n_ready(0);
 }
 
 bool usb_hid_handshake_ready() {
@@ -421,19 +434,38 @@ bool usb_hid_is_paired() {
     return s_paired || s_streamingActive;
 }
 
+bool usb_hid_consume_rehandshake() {
+    if (s_rehandshake_requested) {
+        s_rehandshake_requested = false;
+        return true;
+    }
+    return false;
+}
+
+int usb_hid_get_assigned_player() {
+    return s_lastAssignedPlayer;
+}
+
+uint32_t usb_hid_get_reports_sent() {
+    return s_reportsSent;
+}
+
 bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry, uint8_t hat, uint32_t buttons) {
-    if (!s_initialized || !((bool)USB)) {
+    if (!s_initialized || !tud_mounted()) {
         return false;
     }
 
-    if (!s_hid.ready()) {
+    // Directly check TinyUSB hardware endpoint readiness instead of Arduino-ESP32's
+    // USBHID::SendReport semaphore wrapper (which permanently deadlocks if any single
+    // USB IN transfer fails or is aborted by the host).
+    if (!tud_hid_n_ready(0)) {
         return false;
     }
 
     PS3NativeInputReport rep;
     memset(&rep, 0, sizeof(rep));
 
-    // Convert -127..127 to 0..255 for PS3 sticks
+    // Convert -128..127 to 0..255 for PS3 sticks
     rep.left_x  = (uint8_t)(x + 128);
     rep.left_y  = (uint8_t)(y + 128);
     rep.right_x = (uint8_t)(z + 128);
@@ -442,54 +474,43 @@ bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry,
     // D-Pad Hat Switch (1..8)
     // Bit mapping in sixaxis buttons1: Up=bit 4, Right=bit 5, Down=bit 6, Left=bit 7
     switch (hat) {
-        case 1: rep.buttons1 |= (1 << 4); break; // Up
+        case 1: rep.buttons1 |= (1 << 4); break;            // Up
         case 2: rep.buttons1 |= (1 << 4) | (1 << 5); break; // Up-Right
-        case 3: rep.buttons1 |= (1 << 5); break; // Right
+        case 3: rep.buttons1 |= (1 << 5); break;            // Right
         case 4: rep.buttons1 |= (1 << 5) | (1 << 6); break; // Down-Right
-        case 5: rep.buttons1 |= (1 << 6); break; // Down
+        case 5: rep.buttons1 |= (1 << 6); break;            // Down
         case 6: rep.buttons1 |= (1 << 6) | (1 << 7); break; // Down-Left
-        case 7: rep.buttons1 |= (1 << 7); break; // Left
+        case 7: rep.buttons1 |= (1 << 7); break;            // Left
         case 8: rep.buttons1 |= (1 << 7) | (1 << 4); break; // Up-Left
         default: break;
     }
-    if (rep.buttons1 & (1 << 4)) rep.press_up = 255;
+    if (rep.buttons1 & (1 << 4)) rep.press_up    = 255;
     if (rep.buttons1 & (1 << 5)) rep.press_right = 255;
-    if (rep.buttons1 & (1 << 6)) rep.press_down = 255;
-    if (rep.buttons1 & (1 << 7)) rep.press_left = 255;
+    if (rep.buttons1 & (1 << 6)) rep.press_down  = 255;
+    if (rep.buttons1 & (1 << 7)) rep.press_left  = 255;
 
     // Digital Buttons Mapping to Sixaxis layout
-    // buttons bit 0: CROSS -> buttons2 bit 6
-    if (buttons & (1 << 0)) { rep.buttons2 |= (1 << 6); rep.press_cross = 255; }
-    // buttons bit 1: CIRCLE -> buttons2 bit 5
-    if (buttons & (1 << 1)) { rep.buttons2 |= (1 << 5); rep.press_circle = 255; }
-    // buttons bit 2: SQUARE -> buttons2 bit 7
-    if (buttons & (1 << 2)) { rep.buttons2 |= (1 << 7); rep.press_square = 255; }
-    // buttons bit 3: TRIANGLE -> buttons2 bit 4
-    if (buttons & (1 << 3)) { rep.buttons2 |= (1 << 4); rep.press_triangle = 255; }
-    // buttons bit 4: L1 -> buttons2 bit 2
-    if (buttons & (1 << 4)) { rep.buttons2 |= (1 << 2); rep.press_l1 = 255; }
-    // buttons bit 5: R1 -> buttons2 bit 3
-    if (buttons & (1 << 5)) { rep.buttons2 |= (1 << 3); rep.press_r1 = 255; }
-    // buttons bit 6: L2 -> buttons2 bit 0
-    if (buttons & (1 << 6)) { rep.buttons2 |= (1 << 0); }
-    // buttons bit 7: R2 -> buttons2 bit 1
-    if (buttons & (1 << 7)) { rep.buttons2 |= (1 << 1); }
-    // buttons bit 8: SELECT -> buttons1 bit 0
-    if (buttons & (1 << 8)) { rep.buttons1 |= (1 << 0); }
-    // buttons bit 9: START -> buttons1 bit 3
-    if (buttons & (1 << 9)) { rep.buttons1 |= (1 << 3); }
-    // buttons bit 10: L3 -> buttons1 bit 1
-    if (buttons & (1 << 10)) { rep.buttons1 |= (1 << 1); }
-    // buttons bit 11: R3 -> buttons1 bit 2
-    if (buttons & (1 << 11)) { rep.buttons1 |= (1 << 2); }
-    // buttons bit 12: PS -> ps_button bit 0
-    if (buttons & (1 << 12)) { rep.ps_button |= (1 << 0); }
+    if (buttons & (1 << 0))  { rep.buttons2 |= (1 << 6); rep.press_cross    = 255; } // CROSS
+    if (buttons & (1 << 1))  { rep.buttons2 |= (1 << 5); rep.press_circle   = 255; } // CIRCLE
+    if (buttons & (1 << 2))  { rep.buttons2 |= (1 << 7); rep.press_square   = 255; } // SQUARE
+    if (buttons & (1 << 3))  { rep.buttons2 |= (1 << 4); rep.press_triangle = 255; } // TRIANGLE
+    if (buttons & (1 << 4))  { rep.buttons2 |= (1 << 2); rep.press_l1       = 255; } // L1
+    if (buttons & (1 << 5))  { rep.buttons2 |= (1 << 3); rep.press_r1       = 255; } // R1
+    if (buttons & (1 << 6))  { rep.buttons2 |= (1 << 0); }                           // L2 digital
+    if (buttons & (1 << 7))  { rep.buttons2 |= (1 << 1); }                           // R2 digital
+    if (buttons & (1 << 8))  { rep.buttons1 |= (1 << 0); }                           // SELECT
+    if (buttons & (1 << 9))  { rep.buttons1 |= (1 << 3); }                           // START
+    if (buttons & (1 << 10)) { rep.buttons1 |= (1 << 1); }                           // L3
+    if (buttons & (1 << 11)) { rep.buttons1 |= (1 << 2); }                           // R3
+    if (buttons & (1 << 12)) { rep.ps_button |= (1 << 0); }                          // PS
 
-    // Analog Triggers (rx and ry: -127..127 -> 0..255)
+    // Analog Triggers (rx and ry: -128..127 -> 0..255)
     rep.press_l2 = (uint8_t)(rx + 128);
     rep.press_r2 = (uint8_t)(ry + 128);
-    if (rep.press_l2 > 20) rep.buttons2 |= (1 << 0);
-    if (rep.press_r2 > 20) rep.buttons2 |= (1 << 1);
+
+    // Ensure digital L2/R2 press without analog pressure still populates analog pressure byte
+    if ((buttons & (1 << 6)) && rep.press_l2 == 0) rep.press_l2 = 255;
+    if ((buttons & (1 << 7)) && rep.press_r2 == 0) rep.press_r2 = 255;
 
     // Standard Authentic Status values matching captured PS3 packet #53
     rep.connection = 0x02; // USB
@@ -508,15 +529,15 @@ bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry,
     rep.reserved[1] = 0x02;
 
     // Send 48 bytes with Report ID 0x01 (TinyUSB prepends ID making 49 bytes on wire)
-    return s_hid.SendReport(0x01, &rep, sizeof(rep), 15);
+    bool sent = tud_hid_n_report(0, 0x01, &rep, sizeof(rep));
+    if (sent) {
+        s_reportsSent++;
+    }
+    return sent;
 }
 
 // ---------------------------------------------------------------------------
 // Authentic PlayStation 3 DualShock 3 Configuration Descriptor (41 Bytes)
-// Direct capture from genuine Sony controller:
-// Interface 0: HID, SubClass 0, Protocol 0, iInterface 0, wDescriptorLength 148 (0x94)
-// Endpoint 0x02 OUT (Interrupt, 64 bytes, 1ms)
-// Endpoint 0x81 IN  (Interrupt, 64 bytes, 1ms)
 // ---------------------------------------------------------------------------
 static const uint8_t s_genuine_ds3_config_descriptor[] = {
     0x09,        // bLength
@@ -615,4 +636,3 @@ extern "C" uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t lang
     }
     return desc_str;
 }
-

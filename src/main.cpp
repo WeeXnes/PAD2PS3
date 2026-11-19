@@ -2,7 +2,9 @@
 #include <math.h>
 #include "usb_hid.h"
 #include "controller_state.h"
+#include "config_manager.h"
 #include "ble_gamepad.h"
+#include "web_server.h"
 
 // Report interval: 10ms = 100Hz standard USB controller polling rate
 static const unsigned long REPORT_INTERVAL_MS = 10;
@@ -39,16 +41,22 @@ void setup() {
     // 1. Initialize controller state to neutral
     initControllerState();
 
-    // 2. Initialize Native USB HID stack (sets Sony VID 0x054C, PID 0x0268, and begins USB)
+    // 2. Load persistent configuration (stick curves, trigger curves, button mappings, WiFi)
+    config_init();
+
+    // 3. Initialize Native USB HID stack (sets Sony VID 0x054C, PID 0x0268, and begins USB)
     usb_hid_init();
 
-    // 3. Initialize BLE Central Gamepad Host (for wireless Stadia / BLE gamepads)
+    // 4. Initialize BLE Central Gamepad Host (runs GATT/connect worker on Core 0)
     ble_gamepad_init();
 
-    delay(300);
+    // 5. Initialize WiFi SoftAP Hotspot & Web UI Configuration Server (runs on Core 0)
+    web_server_init();
+
+    delay(200);
 
     logMsg("==================================================");
-    logMsg("ESP32-S3 PS3 Controller Emulator");
+    logMsg("ESP32-S3 PS3 Controller Emulator (PAD2PS3 v2.0)");
     logMsg("Identity: Sony PLAYSTATION(R)3 Controller");
     logMsg("==================================================");
     logMsg("Waiting for USB host connection...");
@@ -58,18 +66,7 @@ void setup() {
 }
 
 /**
- * Executes the automated test sequence requested:
- * Total period: 10,000 ms (10 seconds), repeating forever.
- *
- * 0 - 2000 ms (0-2s): Left Stick Test
- *   - center -> full left -> full right -> center -> full up -> full down -> center
- *
- * 2000 - 5900 ms (2-5s): Button Test
- *   - Press each of the 13 buttons for 300ms in sequence
- *
- * 5900 - 10000 ms (5-10s): Right Stick & Trigger Sweep
- *   - Move right stick in a smooth circular pattern
- *   - Sweep L2 and R2 triggers from 0 to 255
+ * Executes the automated 10-second test sequence when 'demo' mode is toggled ON.
  */
 void updateAutomatedTestSequence(unsigned long currentMs) {
     unsigned long elapsed = (currentMs - s_sequenceStartTime) % 10000;
@@ -83,7 +80,6 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
         currentPhase = 3;
     }
 
-    // Clean reset ONLY when transitioning across major phases
     if (currentPhase != s_lastActivePhase) {
         resetControllerState();
         s_lastActivePhase = currentPhase;
@@ -91,52 +87,38 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
     }
 
     if (currentPhase == 1) {
-        // ==============================================================
-        // PHASE 1 (0-2s): Move Left Stick Slowly
-        // ==============================================================
         if (elapsed < 285) {
-            // center (128) -> full left (0)
             float t = (float)elapsed / 285.0f;
             setAxis(AXIS_LEFT_X, (uint8_t)(128.0f * (1.0f - t)));
             setAxis(AXIS_LEFT_Y, 128);
         } else if (elapsed < 570) {
-            // full left (0) -> full right (255)
             float t = (float)(elapsed - 285) / 285.0f;
             setAxis(AXIS_LEFT_X, (uint8_t)(255.0f * t));
             setAxis(AXIS_LEFT_Y, 128);
         } else if (elapsed < 855) {
-            // full right (255) -> center (128)
             float t = (float)(elapsed - 570) / 285.0f;
             setAxis(AXIS_LEFT_X, (uint8_t)(255.0f - 127.0f * t));
             setAxis(AXIS_LEFT_Y, 128);
         } else if (elapsed < 1140) {
-            // center (128) -> full up (0)
             float t = (float)(elapsed - 855) / 285.0f;
             setAxis(AXIS_LEFT_X, 128);
             setAxis(AXIS_LEFT_Y, (uint8_t)(128.0f * (1.0f - t)));
         } else if (elapsed < 1425) {
-            // full up (0) -> full down (255)
             float t = (float)(elapsed - 1140) / 285.0f;
             setAxis(AXIS_LEFT_X, 128);
             setAxis(AXIS_LEFT_Y, (uint8_t)(255.0f * t));
         } else if (elapsed < 1710) {
-            // full down (255) -> center (128)
             float t = (float)(elapsed - 1425) / 285.0f;
             setAxis(AXIS_LEFT_X, 128);
             setAxis(AXIS_LEFT_Y, (uint8_t)(255.0f - 127.0f * t));
         } else {
-            // center (128, 128)
             setAxis(AXIS_LEFT_X, 128);
             setAxis(AXIS_LEFT_Y, 128);
         }
     } else if (currentPhase == 2) {
-        // ==============================================================
-        // PHASE 2 (2-5.9s): Press Each Button Individually for 300ms
-        // ==============================================================
         unsigned long buttonPhaseTime = elapsed - 2000;
         size_t activeIndex = buttonPhaseTime / 300;
 
-        // Keep sticks neutral during button test
         setAxis(AXIS_LEFT_X, 128);
         setAxis(AXIS_LEFT_Y, 128);
         setAxis(AXIS_RIGHT_X, 128);
@@ -149,10 +131,6 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
             setButton(TEST_BUTTONS[i], (i == activeIndex));
         }
     } else {
-        // ==============================================================
-        // PHASE 3 (5.9-10s): Circular Right Stick & Trigger Sweep
-        // ==============================================================
-        // Release all buttons
         for (size_t i = 0; i < NUM_TEST_BUTTONS; i++) {
             setButton(TEST_BUTTONS[i], false);
         }
@@ -160,24 +138,21 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
         setAxis(AXIS_LEFT_Y, 128);
 
         unsigned long phaseTime = elapsed - (2000 + (NUM_TEST_BUTTONS * 300));
-        unsigned long phaseDuration = 10000 - (2000 + (NUM_TEST_BUTTONS * 300)); // ~4100ms
+        unsigned long phaseDuration = 10000 - (2000 + (NUM_TEST_BUTTONS * 300));
 
         float progress = (float)phaseTime / (float)phaseDuration;
 
-        // Circular right stick (2 full rotations)
         float angle = progress * 4.0f * (float)M_PI;
         uint8_t rx = (uint8_t)(128.0f + 120.0f * cosf(angle));
         uint8_t ry = (uint8_t)(128.0f + 120.0f * sinf(angle));
         setAxis(AXIS_RIGHT_X, rx);
         setAxis(AXIS_RIGHT_Y, ry);
 
-        // Sweep triggers from 0 to 255 and back to 0 (triangle wave)
         float triggerProgress = (progress < 0.5f) ? (progress * 2.0f) : ((1.0f - progress) * 2.0f);
         uint8_t triggerVal = (uint8_t)(triggerProgress * 255.0f);
         setAxis(AXIS_L2, triggerVal);
         setAxis(AXIS_R2, triggerVal);
 
-        // Cycle D-Pad hat switch smoothly (1..8)
         uint8_t dpadDir = 1 + ((uint8_t)(progress * 8.0f) % 8);
         setDpad(dpadDir);
     }
@@ -186,7 +161,7 @@ void updateAutomatedTestSequence(unsigned long currentMs) {
 // ---------------------------------------------------------------------------
 // Interactive Serial CLI State
 // ---------------------------------------------------------------------------
-static bool s_demoEnabled = false; // Automated demo disabled by default
+static bool s_demoEnabled = false;
 static unsigned long s_autoReleaseMs = 0;
 static int8_t s_activeTapButton = -1;
 static uint8_t s_activeTapDpad = 0;
@@ -211,19 +186,20 @@ static void printCliHelp() {
     Serial.println("                    status, help / ?");
     Serial.println("  Bluetooth / BLE:  scan (start BLE scan for Stadia/gamepad)");
     Serial.println("                    ble (print BLE connection status)");
+    Serial.println("  WiFi & Config:    wifi (print WiFi Hotspot & Web UI URL)");
+    Serial.println("                    config (print active JSON configuration)");
+    Serial.println("                    resetcfg (restore factory default settings)");
     Serial.println("==========================================================\n");
 }
 
 static void triggerButtonTap(uint8_t btn, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
-    resetControllerState();
     setButton(btn, true);
     s_activeTapButton = btn;
     s_autoReleaseMs = currentMs + durationMs;
-    Serial.printf("[CLI] Tapped: %s\n", name);
+    Serial.printf("[CLI] Tapped: %s (%lu ms)\n", name, durationMs);
 }
 
 static void triggerDpadTap(uint8_t dir, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
-    resetControllerState();
     setDpad(dir);
     s_activeTapDpad = dir;
     s_autoReleaseMs = currentMs + durationMs;
@@ -231,7 +207,6 @@ static void triggerDpadTap(uint8_t dir, const char* name, unsigned long currentM
 }
 
 static void triggerTriggerTap(uint8_t axis, uint8_t btn, const char* name, unsigned long currentMs, unsigned long durationMs = 150) {
-    resetControllerState();
     setAxis(axis, 255);
     setButton(btn, true);
     if (axis == AXIS_L2) s_activeTapTriggerL2 = true;
@@ -241,8 +216,14 @@ static void triggerTriggerTap(uint8_t axis, uint8_t btn, const char* name, unsig
 }
 
 static void processSerialCLI(unsigned long currentMs) {
+    // Check if Web UI requested a PS button tap/hold
+    unsigned long webPulseMs = 0;
+    if (web_server_consume_ps_pulse(webPulseMs)) {
+        triggerButtonTap(BTN_PS, "PS (Web UI)", currentMs, webPulseMs);
+    }
+
     // 1. Handle auto-release timers for tapped buttons / D-Pad
-    if (s_autoReleaseMs > 0 && currentMs >= s_autoReleaseMs) {
+    if (s_autoReleaseMs > 0 && (long)(currentMs - s_autoReleaseMs) >= 0) {
         if (s_activeTapButton >= 0) {
             setButton(s_activeTapButton, false);
             s_activeTapButton = -1;
@@ -262,10 +243,13 @@ static void processSerialCLI(unsigned long currentMs) {
             s_activeTapTriggerR2 = false;
         }
         if (s_activeTapRumble) {
-            ble_gamepad_set_rumble(0, 0);
+            ble_gamepad_set_rumble(0, 0, 0, 0);
             s_activeTapRumble = false;
         }
         s_autoReleaseMs = 0;
+        if (ble_gamepad_is_connected()) {
+            reapplyActiveConfigToState();
+        }
     }
 
     // 2. Read incoming serial command lines
@@ -279,22 +263,18 @@ static void processSerialCLI(unsigned long currentMs) {
             cmdBuf[cmdLen] = '\0';
             cmdLen = 0;
 
-            // Trim leading non-printable characters or whitespace
             char* p = cmdBuf;
             while (*p && ((unsigned char)*p <= ' ' || (unsigned char)*p > 126)) p++;
-            // Trim trailing non-printable characters or whitespace
             int len = strlen(p);
             while (len > 0 && ((unsigned char)p[len - 1] <= ' ' || (unsigned char)p[len - 1] > 126)) {
                 p[--len] = '\0';
             }
             if (*p == '\0') continue;
 
-            // Convert to lowercase
             for (char* s = p; *s; s++) {
                 if (*s >= 'A' && *s <= 'Z') *s += 32;
             }
 
-            // Command dispatch
             if (strcmp(p, "help") == 0 || strcmp(p, "?") == 0) {
                 printCliHelp();
             } else if (strcmp(p, "x") == 0 || strcmp(p, "cross") == 0 || strcmp(p, "k") == 0) {
@@ -333,7 +313,7 @@ static void processSerialCLI(unsigned long currentMs) {
                 triggerButtonTap(BTN_PS, "PS (pulse)", currentMs, 200);
             } else if (strcmp(p, "pshold") == 0) {
                 setButton(BTN_PS, true);
-                s_autoReleaseMs = 0; // Don't auto-release
+                s_autoReleaseMs = 0;
                 Serial.println("[CLI] Button PS HELD DOWN (type 'psrel' to release)");
             } else if (strcmp(p, "psrel") == 0) {
                 setButton(BTN_PS, false);
@@ -386,7 +366,10 @@ static void processSerialCLI(unsigned long currentMs) {
                 if (*arg) {
                     int val = atoi(arg);
                     if (val < 0) val = 0; else if (val > 100) val = 100;
-                    ble_gamepad_set_rumble_intensity((uint8_t)val);
+                    ControllerConfig cfg = get_config_copy();
+                    cfg.rumbleIntensity = (uint8_t)val;
+                    set_config(cfg, true);
+                    Serial.printf("[CLI] Rumble master intensity set to %d%% (saved)\n", val);
                 } else {
                     Serial.printf("[CLI] Current rumble master intensity: %u%%\n", ble_gamepad_get_rumble_intensity());
                 }
@@ -400,14 +383,26 @@ static void processSerialCLI(unsigned long currentMs) {
                         if (pwr < 0) pwr = 0; else if (pwr > 255) pwr = 255;
                     }
                 }
-                ble_gamepad_set_rumble(pwr > 0 ? 1 : 0, (uint8_t)pwr);
+                ble_gamepad_set_rumble(pwr > 0 ? 1 : 0, (uint8_t)pwr, 500, 500);
                 s_autoReleaseMs = currentMs + 500;
                 s_activeTapRumble = true;
                 Serial.printf("[CLI] Rumble pulse triggered at power %d (500ms)\n", pwr);
             } else if (strcmp(p, "scan") == 0) {
-                ble_gamepad_start_scan();
+                ble_gamepad_disconnect_and_scan();
             } else if (strcmp(p, "ble") == 0) {
                 ble_gamepad_print_status();
+            } else if (strcmp(p, "wifi") == 0) {
+                web_server_print_status();
+            } else if (strcmp(p, "config") == 0) {
+                char json[1024];
+                config_to_json(json, sizeof(json));
+                Serial.println(json);
+            } else if (strcmp(p, "resetcfg") == 0) {
+                ControllerConfig def;
+                config_reset_defaults(def);
+                set_config(def, true);
+                reapplyActiveConfigToState();
+                Serial.println("[CLI] Configuration reset to factory defaults and saved to NVS.");
             } else {
                 Serial.printf("[CLI] Unknown command: '%s'. Type 'help' for command list.\n", p);
             }
@@ -420,13 +415,13 @@ static void processSerialCLI(unsigned long currentMs) {
 void loop() {
     unsigned long currentMs = millis();
 
-    // 1. Process BLE Gamepad host scanning & incoming packet notifications
+    // 1. BLE Gamepad maintenance hook (non-blocking; heavy GATT runs on Core 0)
     ble_gamepad_loop();
 
-    // 2. Process Interactive Serial CLI (always responsive)
+    // 2. Process Interactive Serial CLI & Web UI actions
     processSerialCLI(currentMs);
 
-    // Check USB connection state & handle authentic PS3 pairing sequence
+    // 3. Check USB connection state & handle authentic PS3 pairing sequence
     static unsigned long s_connectedTime = 0;
     static unsigned long s_pulseStartTime = 0;
     static bool s_pairingPulseDone = false;
@@ -443,18 +438,26 @@ void loop() {
             Serial.println("[MAIN] Host USB mounted & ready! Waiting for PS3 feature exchange...");
         }
 
+        // If PS3 re-initiated feature 0xF7 handshake (e.g., on game launch or mode switch),
+        // re-run the PS button pairing pulse sequence automatically.
+        if (usb_hid_consume_rehandshake()) {
+            s_connectedTime = currentMs;
+            s_pulseStartTime = 0;
+            s_pairingPulseDone = false;
+            s_reportedPaired = false;
+            Serial.println("[MAIN] PS3 requested re-handshake! Re-arming PS pairing pulse...");
+        }
+
         if (usb_hid_is_paired() && !s_reportedPaired) {
             s_reportedPaired = true;
             Serial.println("[MAIN] Native PS3 Console Handshake confirmed active!");
         }
 
         if (!s_pairingPulseDone) {
-            // DO NOT send ANY interrupt reports until PS3 completes Feature Reports (0xF7)!
-            // Fallback timeout: 2500ms in case connected to PC where 0xF7 is not requested
+            // Wait until PS3 completes Feature Reports (0xF7), or 2500ms fallback for PC
             bool readyForPulse = usb_hid_handshake_ready() || (currentMs - s_connectedTime > 2500);
 
             if (!readyForPulse) {
-                resetControllerState();
                 delay(1);
                 return;
             }
@@ -466,19 +469,17 @@ void loop() {
 
             // Hold PS button until PS3 sends F4 command (usb_hid_is_paired()) or for 1200ms max
             if (!usb_hid_is_paired() && (currentMs - s_pulseStartTime < 1200)) {
-                resetControllerState();
                 setButton(BTN_PS, true);
             } else {
-                // Release PS button
-                resetControllerState();
                 setButton(BTN_PS, false);
+                if (ble_gamepad_is_connected()) {
+                    reapplyActiveConfigToState();
+                }
                 s_pairingPulseDone = true;
                 s_sequenceStartTime = currentMs;
-                Serial.println("[MAIN] Controller paired & active! Interactive Serial CLI ready.");
-                Serial.println("[MAIN] Type 'help' or '?' for command list. Demo loop is DISABLED.");
+                Serial.println("[MAIN] Controller paired & active! Web UI & Serial CLI ready.");
             }
         } else {
-            // Optional automated demo loop (only if toggled ON via 'demo' command)
             if (s_demoEnabled) {
                 updateAutomatedTestSequence(currentMs);
             }
@@ -492,7 +493,6 @@ void loop() {
             }
         }
 
-        // Only print periodic debug state if automated demo loop is enabled
         if (s_demoEnabled) {
             static unsigned long s_lastDebugPrint = 0;
             if (currentMs - s_lastDebugPrint >= 500) {
@@ -507,11 +507,11 @@ void loop() {
             s_pulseStartTime = 0;
             s_pairingPulseDone = false;
             s_reportedPaired = false;
+            resetControllerState();
             Serial.println("[MAIN] Host USB disconnected / idle.");
         }
-        resetControllerState();
     }
 
-    // Yield to freeRTOS scheduler / USB background tasks
+    // Yield to FreeRTOS scheduler / USB background tasks
     delay(1);
 }

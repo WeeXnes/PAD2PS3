@@ -9,8 +9,8 @@
  * Gamepad USB Identification
  * - Vendor ID: 0x054C (Sony Corp.)
  * - Product ID: 0x0268 (PlayStation 3 DualShock 3)
- * - Product Name: "DualShock 3 Compatible Controller"
- * - Manufacturer: "Sony Interactive Entertainment"
+ * - Product Name: "PLAYSTATION(R)3 Controller"
+ * - Manufacturer: "Sony"
  */
 #define USB_CONTROLLER_VID          0x054C
 #define USB_CONTROLLER_PID          0x0268
@@ -18,8 +18,8 @@
 #define USB_CONTROLLER_MANUFACTURER "Sony"
 
 /**
- * Genuine Sony PS3 49-Byte Native Report Layout
- * (Architecture reserved for Phase 2 Native PS3 Console Pairing)
+ * Genuine Sony PS3 48-Byte Native Report Payload Layout
+ * (Prepended with 1-byte Report ID 0x01 on wire = 49 bytes)
  */
 #pragma pack(push, 1)
 struct PS3NativeInputReport {
@@ -69,6 +69,9 @@ bool usb_hid_is_mounted();
 bool usb_hid_ready();
 bool usb_hid_handshake_ready();
 bool usb_hid_is_paired();
+bool usb_hid_consume_rehandshake();
+int  usb_hid_get_assigned_player();
+uint32_t usb_hid_get_reports_sent();
 bool usb_hid_send(int8_t x, int8_t y, int8_t z, int8_t rz, int8_t rx, int8_t ry, uint8_t hat, uint32_t buttons);
 
 #endif // USB_HID_H

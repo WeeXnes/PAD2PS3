@@ -1,118 +1,123 @@
 #include "ble_gamepad.h"
 #include "controller_state.h"
+#include "config_manager.h"
 #include <NimBLEDevice.h>
 
 static NimBLEAddress s_targetAddress;
+static NimBLEAddress s_lastConnectedAddress;
+static bool s_hasLastConnected = false;
 static std::string s_targetName = "";
 static NimBLEClient* s_pClient = nullptr;
 static NimBLERemoteCharacteristic* s_pRumbleChar = nullptr;
+
 static uint16_t s_lastRumbleLeft = 0;
 static uint16_t s_lastRumbleRight = 0;
-static bool s_doConnect = false;
-static bool s_connected = false;
-static bool s_isScanning = false;
+static volatile bool s_doConnect = false;
+static volatile bool s_doDisconnect = false;
+static volatile bool s_connected = false;
+static volatile bool s_connecting = false;
+static volatile bool s_isScanning = false;
 static unsigned long s_lastScanStart = 0;
+
 static uint8_t s_prevData[64] = {0};
 static size_t s_prevLen = 0;
+static unsigned long s_lastStateRefreshMs = 0;
+
+static volatile uint32_t s_packetCount = 0;
+static volatile unsigned long s_lastPacketMs = 0;
+static volatile int s_lastRssi = -50;
+
+static uint8_t s_targetRumbleSmall = 0;
+static uint8_t s_targetRumbleBig = 0;
+static unsigned long s_rumbleSmallExpireMs = 0;
+static unsigned long s_rumbleBigExpireMs = 0;
+static volatile bool s_rumbleChanged = false;
+static unsigned long s_lastRumbleSendMs = 0;
+static uint8_t s_rumbleIntensityPercent = 60;
+static portMUX_TYPE s_rumbleMux = portMUX_INITIALIZER_UNLOCKED;
+
+static TaskHandle_t s_bleWorkerTaskHandle = nullptr;
 
 static void onScanEnded(NimBLEScanResults results) {
     s_isScanning = false;
 }
 
 /**
- * Maps the Google Stadia BLE input report directly into the PS3 controller state.
- * Verified with live Wireshark HID descriptor and hardware calibration dumps:
- *
- * Byte 0: D-Pad Hat Switch (0=Up, 1=Up-Right, 2=Right, ..., 7=Up-Left, 8=Centered)
- * Byte 1: System Buttons & Stick Clicks (Low Byte):
- *         bit 7: R3 (Right Stick Click)
- *         bit 6: Options / Select
- *         bit 5: Menu / Start
- *         bit 4: Stadia Logo / PS Button
- *         bit 3: Assistant Button
- *         bit 2: Capture Button
- *         bit 1: L2 digital click
- *         bit 0: R2 digital click
- * Byte 2: Action Buttons & Bumpers (High Byte):
- *         bit 6: A / Cross
- *         bit 5: B / Circle
- *         bit 4: X / Square
- *         bit 3: Y / Triangle
- *         bit 2: L1 Bumper
- *         bit 1: R1 Bumper
- *         bit 0: L3 (Left Stick Click)
- * Byte 3: Left Stick X  (0..255, 128=center)
- * Byte 4: Left Stick Y  (0..255, 128=center)
- * Byte 5: Right Stick X (0..255, 128=center)
- * Byte 6: Right Stick Y (0..255, 128=center)
- * Byte 7: Left Trigger (L2) analog (0..255)
- * Byte 8: Right Trigger (R2) analog (0..255)
- * Byte 9: Consumer / Media Buttons (if present)
+ * Maps the Google Stadia BLE input report into a Raw ControllerState and runs
+ * it through the active deadzone, response curve, and button mapping pipeline.
  */
 static void processStadiaReport(const uint8_t* pData, size_t length) {
     if (length < 7) return;
 
+    ControllerState raw;
+    memset(&raw, 0, sizeof(raw));
+
     // 1. D-Pad Hat Switch (Byte 0)
     uint8_t hat = pData[0] & 0x0F;
     if (hat <= 7) {
-        setDpad(hat + 1); // 0..7 -> 1..8 (DPAD_UP..DPAD_UP_LEFT)
+        raw.dpad = hat + 1; // 0..7 -> 1..8 (DPAD_UP..DPAD_UP_LEFT)
     } else {
-        setDpad(DPAD_CENTERED);
+        raw.dpad = DPAD_CENTERED;
     }
 
     // 2. Action Buttons & Bumpers & L3 (Byte 2)
     uint8_t b2 = pData[2];
-    setButton(BTN_CROSS,    (b2 & (1 << 6)) != 0); // A -> Cross
-    setButton(BTN_CIRCLE,   (b2 & (1 << 5)) != 0); // B -> Circle
-    setButton(BTN_SQUARE,   (b2 & (1 << 4)) != 0); // X -> Square
-    setButton(BTN_TRIANGLE, (b2 & (1 << 3)) != 0); // Y -> Triangle
-    setButton(BTN_L1,       (b2 & (1 << 2)) != 0); // L1 Bumper
-    setButton(BTN_R1,       (b2 & (1 << 1)) != 0); // R1 Bumper
-    setButton(BTN_L3,       (b2 & (1 << 0)) != 0); // L3 (Left Stick Click)
+    if (b2 & (1 << 6)) raw.buttons1 |= (1 << BTN_CROSS);    // A -> Cross
+    if (b2 & (1 << 5)) raw.buttons1 |= (1 << BTN_CIRCLE);   // B -> Circle
+    if (b2 & (1 << 4)) raw.buttons1 |= (1 << BTN_SQUARE);   // X -> Square
+    if (b2 & (1 << 3)) raw.buttons1 |= (1 << BTN_TRIANGLE); // Y -> Triangle
+    if (b2 & (1 << 2)) raw.buttons1 |= (1 << BTN_L1);       // L1 Bumper
+    if (b2 & (1 << 1)) raw.buttons1 |= (1 << BTN_R1);       // R1 Bumper
+    if (b2 & (1 << 0)) raw.buttons2 |= (1 << (BTN_L3 - 8)); // L3 (Left Stick Click)
 
     // 3. System Buttons & R3 & Clicks (Byte 1)
     uint8_t b1 = pData[1];
-    setButton(BTN_R3,     (b1 & (1 << 7)) != 0); // R3 (Right Stick Click)
-    setButton(BTN_SELECT, (b1 & (1 << 6)) != 0); // Options (...) -> Select
-    setButton(BTN_START,  (b1 & (1 << 5)) != 0); // Menu (hamburger) -> Start
-    setButton(BTN_PS,     (b1 & (1 << 4)) != 0); // Stadia Logo -> PS Button
-    setButton(BTN_EXTRA1, (b1 & (1 << 3)) != 0); // Assistant
-    setButton(BTN_EXTRA2, (b1 & (1 << 2)) != 0); // Capture
+    if (b1 & (1 << 7)) raw.buttons2 |= (1 << (BTN_R3 - 8));     // R3 (Right Stick Click)
+    if (b1 & (1 << 6)) raw.buttons2 |= (1 << (BTN_SELECT - 8)); // Options (...) -> Select
+    if (b1 & (1 << 5)) raw.buttons2 |= (1 << (BTN_START - 8));  // Menu (hamburger) -> Start
+    if (b1 & (1 << 4)) raw.buttons2 |= (1 << (BTN_PS - 8));     // Stadia Logo -> PS Button
+    if (b1 & (1 << 3)) raw.buttons2 |= (1 << (BTN_EXTRA1 - 8)); // Assistant
+    if (b1 & (1 << 2)) raw.buttons2 |= (1 << (BTN_EXTRA2 - 8)); // Capture
+    if (b1 & (1 << 1)) raw.buttons1 |= (1 << BTN_L2_DIGITAL);   // Raw L2 digital bit
+    if (b1 & (1 << 0)) raw.buttons1 |= (1 << BTN_R2_DIGITAL);   // Raw R2 digital bit
 
     // 4. Analog Sticks (Bytes 3..6)
-    setAxis(AXIS_LEFT_X,  pData[3]);
-    setAxis(AXIS_LEFT_Y,  pData[4]);
-    setAxis(AXIS_RIGHT_X, pData[5]);
-    setAxis(AXIS_RIGHT_Y, pData[6]);
+    raw.leftX  = pData[3];
+    raw.leftY  = pData[4];
+    raw.rightX = pData[5];
+    raw.rightY = pData[6];
 
     // 5. Analog Triggers L2 & R2 (Bytes 7 & 8)
-    uint8_t l2 = (length > 7) ? pData[7] : 0;
-    uint8_t r2 = (length > 8) ? pData[8] : 0;
-    setAxis(AXIS_L2, l2);
-    setAxis(AXIS_R2, r2);
-    setButton(BTN_L2_DIGITAL, (l2 > 30) || ((b1 & (1 << 1)) != 0));
-    setButton(BTN_R2_DIGITAL, (r2 > 30) || ((b1 & (1 << 0)) != 0));
+    raw.L2 = (length > 7) ? pData[7] : 0;
+    raw.R2 = (length > 8) ? pData[8] : 0;
+
+    updateFromRawGamepadState(raw);
 }
 
 static void notifyCallback(NimBLERemoteCharacteristic* pBLERemoteCharacteristic,
                            uint8_t* pData, size_t length, bool isNotify) {
     if (length == 0 || pData == nullptr) return;
 
-    // Filter out reports if data didn't change
-    if (s_prevLen == length && memcmp(s_prevData, pData, length) == 0) {
+    unsigned long now = millis();
+    s_packetCount++;
+    s_lastPacketMs = now;
+
+    bool dataIdentical = (s_prevLen == length && memcmp(s_prevData, pData, length) == 0);
+    // Even if raw bytes haven't changed, refresh state every 200ms so held inputs
+    // recover immediately after any CLI command or USB re-mount.
+    if (dataIdentical && (now - s_lastStateRefreshMs < 200)) {
         return;
     }
+    s_lastStateRefreshMs = now;
 
-    // Map Stadia input directly into active PS3 Controller State
     processStadiaReport(pData, length);
 
-    if (getDebugLog()) {
+    if (!dataIdentical && getDebugLog()) {
         uint8_t l2 = (length > 7) ? pData[7] : 0;
         uint8_t r2 = (length > 8) ? pData[8] : 0;
         uint8_t b1 = (length > 1) ? pData[1] : 0;
         uint8_t b2 = (length > 2) ? pData[2] : 0;
 
-        // Print live status
         Serial.printf("[STADIA -> PS3] DPAD:%u | LX:%3u LY:%3u | RX:%3u RY:%3u | L2:%3u R2:%3u | ACT:0x%02X SYS:0x%02X\n",
                       pData[0] & 0x0F, pData[3], pData[4], pData[5], pData[6], l2, r2, b2, b1);
     }
@@ -134,15 +139,21 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         s_pRumbleChar = nullptr;
         s_lastRumbleLeft = 0;
         s_lastRumbleRight = 0;
-        resetControllerState(); // Release all inputs on disconnect
+        resetControllerState();
         Serial.println("[BLE] Disconnected from BLE gamepad!");
-        Serial.println("[BLE] Resuming scan in 1 second...");
-        s_lastScanStart = millis() + 1000;
+        Serial.println("[BLE] Resuming scan in 500ms...");
+        s_lastScanStart = millis() + 500;
     }
 
     bool onConnParamsUpdateRequest(NimBLEClient* pClient, const ble_gap_upd_params* params) override {
-        // Accept and match peer's requested connection parameters so NimBLE doesn't clash
-        pClient->setConnectionParams(params->itvl_min, params->itvl_max, params->latency, params->supervision_timeout);
+        // Keep connection interval responsive and supervision timeout generous (>= 5 seconds)
+        // so the gamepad does not drop after 30-40 minutes due to brief RF interference or high slave latency.
+        uint16_t itvl_min = params->itvl_min < 6 ? 6 : params->itvl_min;
+        uint16_t itvl_max = params->itvl_max > 28 ? 28 : params->itvl_max;
+        if (itvl_max < itvl_min) itvl_max = itvl_min;
+        uint16_t latency = params->latency > 2 ? 2 : params->latency;
+        uint16_t timeout = params->supervision_timeout < 500 ? 600 : params->supervision_timeout;
+        pClient->setConnectionParams(itvl_min, itvl_max, latency, timeout);
         return true;
     }
 };
@@ -151,107 +162,97 @@ static ClientCallbacks s_clientCallbacks;
 
 class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+        if (s_connected || s_doConnect || s_connecting) return;
+
         std::string name = advertisedDevice->getName();
-        std::string addr = advertisedDevice->getAddress().toString();
+        NimBLEAddress devAddr = advertisedDevice->getAddress();
+        std::string addr = devAddr.toString();
         bool hasHidService = advertisedDevice->isAdvertisingService(NimBLEUUID((uint16_t)0x1812));
+        uint16_t appearance = advertisedDevice->getAppearance();
+        bool isHidAppearance = (appearance == 0x03C4 || appearance == 0x03C3 || appearance == 0x03C0);
+        bool isKnownReconnect = (s_hasLastConnected && devAddr == s_lastConnectedAddress);
 
         bool isStadia = (name.find("Stadia") != std::string::npos);
-        bool isGamepad = hasHidService || isStadia ||
+        bool isGamepad = isKnownReconnect || hasHidService || isHidAppearance || isStadia ||
                          (name.find("Gamepad") != std::string::npos) ||
                          (name.find("Controller") != std::string::npos) ||
                          (name.find("Wireless") != std::string::npos) ||
                          (name.find("Xbox") != std::string::npos) ||
-                         (name.find("8BitDo") != std::string::npos);
+                         (name.find("8BitDo") != std::string::npos) ||
+                         (name.find("DualSense") != std::string::npos) ||
+                         (name.find("DualShock") != std::string::npos);
 
         if (isGamepad) {
             Serial.println("==================================================");
             Serial.printf("[BLE SCAN] FOUND GAMEPAD!\n");
-            Serial.printf("[BLE SCAN] Name: '%s'\n", name.c_str());
+            Serial.printf("[BLE SCAN] Name: '%s'%s\n", name.c_str(), isKnownReconnect ? " (Fast Reconnect)" : "");
             Serial.printf("[BLE SCAN] MAC:  %s\n", addr.c_str());
             Serial.printf("[BLE SCAN] RSSI: %d dBm\n", advertisedDevice->getRSSI());
             Serial.println("==================================================");
 
+            s_lastRssi = advertisedDevice->getRSSI();
             NimBLEDevice::getScan()->stop();
             s_isScanning = false;
 
-            s_targetAddress = advertisedDevice->getAddress();
-            s_targetName = name;
+            s_targetAddress = devAddr;
+            if (!name.empty()) {
+                s_targetName = name;
+            } else if (s_targetName.empty()) {
+                s_targetName = "BLE Gamepad";
+            }
             s_doConnect = true;
-        } else if (!name.empty()) {
-            Serial.printf("[BLE SCAN] Nearby BLE: '%s' (%s)\n", name.c_str(), addr.c_str());
         }
     }
 };
 
 static AdvertisedDeviceCallbacks s_advCallbacks;
 
-void ble_gamepad_init() {
-    Serial.println("[BLE] Initializing NimBLE Bluetooth Stack...");
-    NimBLEDevice::init("PS3-Bridge-Host");
-
-    // Boost TX power for strong connection link
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-
-    // Standard "Just Works" pairing with bonding enabled (essential for Google Stadia & BLE gamepads)
-    NimBLEDevice::setSecurityAuth(true, false, true);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-    NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-    NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setAdvertisedDeviceCallbacks(&s_advCallbacks, false);
-    pScan->setActiveScan(true);
-    pScan->setInterval(80);
-    pScan->setWindow(60);
-
-    ble_gamepad_start_scan();
-}
-
-void ble_gamepad_start_scan() {
-    if (s_connected) {
-        Serial.println("[BLE] Already connected to a gamepad. Disconnect first.");
-        return;
-    }
-
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    if (pScan->isScanning()) {
-        pScan->stop();
-    }
-
-    Serial.println("[BLE] Starting BLE Gamepad Scan (looking for Stadia / BLE gamepads)...");
-    s_isScanning = true;
-    s_lastScanStart = millis();
-    pScan->start(0, onScanEnded, false);
-}
-
 static bool connectToTarget(const NimBLEAddress& address, const std::string& name) {
+    s_connecting = true;
     Serial.printf("[BLE] Connecting to %s (%s)...\n", name.c_str(), address.toString().c_str());
 
-    // Small delay after stopping scan to let BLE radio settle
-    delay(100);
-
-    NimBLEClient* pClient = nullptr;
-    if (NimBLEDevice::getClientListSize()) {
-        pClient = NimBLEDevice::getClientByPeerAddress(address);
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan && pScan->isScanning()) {
+        pScan->stop();
     }
+    vTaskDelay(pdMS_TO_TICKS(80));
+
+    // Clean up any stale client instances before creating a fresh connection
+    // to prevent stale GATT attribute handle caches across reconnects.
+    if (s_pClient) {
+        if (s_pClient->isConnected()) {
+            s_pClient->disconnect();
+        }
+        NimBLEClient* old = s_pClient;
+        s_pClient = nullptr;
+        s_pRumbleChar = nullptr;
+        NimBLEDevice::deleteClient(old);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    NimBLEClient* pClient = NimBLEDevice::getClientByPeerAddress(address);
+    if (pClient) {
+        NimBLEDevice::deleteClient(pClient);
+        pClient = nullptr;
+    }
+
+    pClient = NimBLEDevice::createClient();
     if (!pClient) {
-        if (NimBLEDevice::getClientListSize() >= NIMBLE_MAX_CONNECTIONS) {
-            pClient = NimBLEDevice::getDisconnectedClient();
-        }
-        if (!pClient) {
-            pClient = NimBLEDevice::createClient();
-        }
-        pClient->setClientCallbacks(&s_clientCallbacks, false);
+        Serial.println("[BLE] ERROR: Failed to allocate NimBLEClient!");
+        s_connecting = false;
+        return false;
     }
 
-    // Set connection parameters: 15ms interval, supervision timeout 600 (6000ms)
+    pClient->setClientCallbacks(&s_clientCallbacks, false);
+    // 15ms interval, 0 latency, 6000ms supervision timeout
     pClient->setConnectionParams(12, 24, 0, 600);
-    pClient->setConnectTimeout(10);
+    pClient->setConnectTimeout(8);
 
     if (!pClient->connect(address)) {
         Serial.println("[BLE] ERROR: Link connection failed! Retrying scan...");
         NimBLEDevice::deleteClient(pClient);
         s_connected = false;
+        s_connecting = false;
         return false;
     }
 
@@ -273,6 +274,8 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
     if (!pHidService) {
         Serial.println("[BLE] ERROR: No HID Service (0x1812) found on target device!");
         pClient->disconnect();
+        NimBLEDevice::deleteClient(pClient);
+        s_connecting = false;
         return false;
     }
 
@@ -283,7 +286,6 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
 
     if (chars) {
         for (auto chr : *chars) {
-            // Subscribe to Input Reports
             if (chr->canNotify()) {
                 Serial.printf("[BLE] Subscribing to HID Report Char %s (handle 0x%04X)...\n",
                               chr->getUUID().toString().c_str(), chr->getHandle());
@@ -295,7 +297,6 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
                 }
             }
 
-            // Discover Haptic / Rumble Output Report (Report ID 5 on Stadia)
             if (chr->canWrite() || chr->canWriteNoResponse()) {
                 NimBLERemoteDescriptor* pDesc = chr->getDescriptor(NimBLEUUID((uint16_t)0x2908));
                 if (pDesc) {
@@ -317,89 +318,128 @@ static bool connectToTarget(const NimBLEAddress& address, const std::string& nam
         }
     }
 
-    s_connected = (subscribedCount > 0);
-    if (s_connected) {
+    if (subscribedCount > 0) {
         s_pClient = pClient;
+        s_lastConnectedAddress = address;
+        s_hasLastConnected = true;
         s_prevLen = 0;
         s_lastRumbleLeft = 0;
         s_lastRumbleRight = 0;
+        s_lastPacketMs = millis();
+        s_connected = true;
         Serial.println("==================================================");
-        Serial.println("[BLE] *** STADIA CONTROLLER MAPPED DIRECTLY TO PS3! ***");
+        Serial.println("[BLE] *** GAMEPAD MAPPED DIRECTLY TO PS3! ***");
         Serial.printf("[BLE] Device: %s (%s)\n", name.c_str(), address.toString().c_str());
         Serial.printf("[BLE] Haptic/Rumble Feedback: %s\n", s_pRumbleChar ? "SUPPORTED (Active)" : "NOT FOUND");
-        Serial.println("[BLE] Wireless inputs are now actively driving PS3 DualShock 3!");
         Serial.println("==================================================");
     } else {
         Serial.println("[BLE] ERROR: No notifiable input reports could be subscribed.");
         pClient->disconnect();
+        NimBLEDevice::deleteClient(pClient);
+        s_connected = false;
     }
 
+    s_connecting = false;
     return s_connected;
 }
 
-static uint8_t s_targetRumbleSmall = 0;
-static uint8_t s_targetRumbleBig = 0;
-static bool s_rumbleChanged = false;
-static unsigned long s_lastRumbleSendMs = 0;
-static uint8_t s_rumbleIntensityPercent = 60; // Default 60% master rumble intensity
-
 void ble_gamepad_set_rumble_intensity(uint8_t percent) {
     if (percent > 100) percent = 100;
+    portENTER_CRITICAL(&s_rumbleMux);
     s_rumbleIntensityPercent = percent;
     s_rumbleChanged = true;
-    Serial.printf("[BLE] Rumble master intensity set to %u%%\n", percent);
+    portEXIT_CRITICAL(&s_rumbleMux);
 }
 
 uint8_t ble_gamepad_get_rumble_intensity() {
     return s_rumbleIntensityPercent;
 }
 
-void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor) {
-    // Non-blocking: update targets immediately so TinyUSB control endpoint ISR is never stalled
+void ble_gamepad_set_rumble(uint8_t small_motor, uint8_t big_motor, uint16_t small_dur_ms, uint16_t big_dur_ms) {
+    unsigned long now = millis();
+    portENTER_CRITICAL(&s_rumbleMux);
+    if (small_motor > 0 && small_dur_ms > 0) {
+        s_rumbleSmallExpireMs = now + small_dur_ms;
+    } else {
+        small_motor = 0;
+        s_rumbleSmallExpireMs = 0;
+    }
+
+    if (big_motor > 0 && big_dur_ms > 0) {
+        s_rumbleBigExpireMs = now + big_dur_ms;
+    } else {
+        big_motor = 0;
+        s_rumbleBigExpireMs = 0;
+    }
+
     if (s_targetRumbleSmall != small_motor || s_targetRumbleBig != big_motor) {
         s_targetRumbleSmall = small_motor;
         s_targetRumbleBig = big_motor;
         s_rumbleChanged = true;
     }
+    portEXIT_CRITICAL(&s_rumbleMux);
 }
 
 static void processPendingRumble() {
-    if (!s_connected || s_pRumbleChar == nullptr || !s_rumbleChanged) {
+    if (!s_connected || s_pRumbleChar == nullptr || s_pClient == nullptr) {
         return;
     }
-    if (s_pClient == nullptr || !s_pClient->isConnected()) {
+    if (!s_pClient->isConnected()) {
         return;
     }
 
     unsigned long now = millis();
-    // Allow immediate write when turning off rumble (0,0), otherwise rate-limit to 40ms intervals
-    bool stopping = (s_targetRumbleSmall == 0 && s_targetRumbleBig == 0);
-    if (!stopping && (now - s_lastRumbleSendMs < 40)) {
-        return;
+    uint8_t smallVal = 0;
+    uint8_t bigVal = 0;
+    uint8_t masterPct = 60;
+    bool shouldSend = false;
+
+    portENTER_CRITICAL(&s_rumbleMux);
+    // Auto-expire motors if PS3 stopped refreshing rumble duration
+    if (s_targetRumbleSmall > 0 && s_rumbleSmallExpireMs > 0 && (long)(now - s_rumbleSmallExpireMs) >= 0) {
+        s_targetRumbleSmall = 0;
+        s_rumbleSmallExpireMs = 0;
+        s_rumbleChanged = true;
+    }
+    if (s_targetRumbleBig > 0 && s_rumbleBigExpireMs > 0 && (long)(now - s_rumbleBigExpireMs) >= 0) {
+        s_targetRumbleBig = 0;
+        s_rumbleBigExpireMs = 0;
+        s_rumbleChanged = true;
     }
 
-    s_lastRumbleSendMs = now;
-    s_rumbleChanged = false;
+    smallVal  = s_targetRumbleSmall;
+    bigVal    = s_targetRumbleBig;
+    masterPct = s_rumbleIntensityPercent;
 
-    // Convert PS3 motor values to Stadia 16-bit values (0..65534):
-    // 1. Right motor (small_motor): High-frequency light buzz on PS3 (binary 0 or 1, or 0..255).
-    // On original DS3, value 1 is a moderate high-pitch buzz (~35-40% power).
-    // We map 1 to 24,000 base power (~36%), which feels crisp without excessive rattling.
+    bool stopping = (smallVal == 0 && bigVal == 0);
+    if (s_rumbleChanged && (stopping || (now - s_lastRumbleSendMs >= 50))) {
+        s_rumbleChanged = false;
+        s_lastRumbleSendMs = now;
+        shouldSend = true;
+    }
+    portEXIT_CRITICAL(&s_rumbleMux);
+
+    if (!shouldSend) return;
+
+    ControllerConfig cfg = get_config_copy();
+
+    // Right motor (small_motor): High-frequency light buzz on PS3
     uint32_t r_base = 0;
-    if (s_targetRumbleSmall == 1) {
+    if (smallVal == 1) {
         r_base = 24000;
-    } else if (s_targetRumbleSmall > 1) {
-        r_base = ((uint32_t)s_targetRumbleSmall * 24000) / 255;
+    } else if (smallVal > 1) {
+        r_base = ((uint32_t)smallVal * 24000) / 255;
     }
+    r_base = (r_base * cfg.rumbleRightScale) / 100;
 
-    // 2. Left motor (big_motor): Heavy low-frequency rumble (0..255).
-    // Linear base scale to 65534.
-    uint32_t l_base = (uint32_t)s_targetRumbleBig * 257;
+    // Left motor (big_motor): Heavy low-frequency rumble (0..255)
+    uint32_t l_base = (uint32_t)bigVal * 257;
     if (l_base > 65534) l_base = 65534;
+    l_base = (l_base * cfg.rumbleLeftScale) / 100;
 
-    // 3. Apply master intensity scaling percentage (default 60%)
-    uint32_t l_scaled = (l_base * s_rumbleIntensityPercent) / 100;
-    uint32_t r_scaled = (r_base * s_rumbleIntensityPercent) / 100;
+    // Apply master intensity scaling percentage
+    uint32_t l_scaled = (l_base * masterPct) / 100;
+    uint32_t r_scaled = (r_base * masterPct) / 100;
 
     if (l_scaled > 65534) l_scaled = 65534;
     if (r_scaled > 65534) r_scaled = 65534;
@@ -413,47 +453,174 @@ static void processPendingRumble() {
     s_lastRumbleLeft = left_16;
     s_lastRumbleRight = right_16;
 
-    // 4-byte PID Output Report payload: [left_lo, left_hi, right_lo, right_hi]
     uint8_t payload[4];
     payload[0] = (uint8_t)(left_16 & 0xFF);
     payload[1] = (uint8_t)((left_16 >> 8) & 0xFF);
     payload[2] = (uint8_t)(right_16 & 0xFF);
     payload[3] = (uint8_t)((right_16 >> 8) & 0xFF);
 
-    bool noResponse = s_pRumbleChar->canWriteNoResponse();
-    s_pRumbleChar->writeValue(payload, sizeof(payload), !noResponse);
+    if (s_pRumbleChar && s_connected && s_pClient && s_pClient->isConnected()) {
+        bool noResponse = s_pRumbleChar->canWriteNoResponse();
+        s_pRumbleChar->writeValue(payload, sizeof(payload), !noResponse);
+    }
+}
+
+void ble_gamepad_start_scan() {
+    if (s_connected || s_connecting) {
+        return;
+    }
+
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (!pScan) return;
+
+    if (pScan->isScanning()) {
+        pScan->stop();
+    }
+    // Always clear cached scan results so previously seen MACs and heap memory
+    // are never stuck or leaked over long sessions.
+    pScan->clearResults();
+
+    Serial.println("[BLE] Starting BLE Gamepad Scan (looking for Stadia / BLE gamepads)...");
+    s_isScanning = true;
+    s_lastScanStart = millis();
+    pScan->start(0, onScanEnded, false);
+}
+
+void ble_gamepad_disconnect_and_scan() {
+    s_doDisconnect = true;
+}
+
+static void bleWorkerTask(void* param) {
+    (void)param;
+    unsigned long lastHealthCheckMs = 0;
+
+    for (;;) {
+        unsigned long now = millis();
+
+        if (s_doDisconnect) {
+            s_doDisconnect = false;
+            if (s_pClient && s_pClient->isConnected()) {
+                s_pClient->disconnect();
+            }
+            s_connected = false;
+            resetControllerState();
+            vTaskDelay(pdMS_TO_TICKS(200));
+            ble_gamepad_start_scan();
+        }
+
+        if (s_doConnect) {
+            s_doConnect = false;
+            if (!connectToTarget(s_targetAddress, s_targetName)) {
+                s_lastScanStart = millis() + 1000;
+            }
+        }
+
+        // Process rumble updates & motor expiry watchdog inside background worker task
+        // so GATT writes never stall the 100Hz USB HID loop on Core 1.
+        processPendingRumble();
+
+        // Periodic link health check & scan refresh
+        if (now - lastHealthCheckMs >= 2000) {
+            lastHealthCheckMs = now;
+            if (s_connected) {
+                if (!s_pClient || !s_pClient->isConnected()) {
+                    Serial.println("[BLE] Watchdog detected dead link, cleaning up...");
+                    s_connected = false;
+                    s_pRumbleChar = nullptr;
+                    resetControllerState();
+                    s_lastScanStart = now + 500;
+                } else {
+                    s_lastRssi = s_pClient->getRssi();
+                }
+            } else if (!s_connecting && !s_doConnect) {
+                NimBLEScan* pScan = NimBLEDevice::getScan();
+                if (pScan) {
+                    if (!pScan->isScanning() && (long)(now - s_lastScanStart) >= 0) {
+                        ble_gamepad_start_scan();
+                    } else if (pScan->isScanning() && (now - s_lastScanStart >= 15000)) {
+                        // Periodically flush scan cache every 15s while searching
+                        pScan->clearResults();
+                        s_lastScanStart = now;
+                    }
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void ble_gamepad_init() {
+    Serial.println("[BLE] Initializing NimBLE Bluetooth Stack...");
+    NimBLEDevice::init("PS3-Bridge-Host");
+
+    // Strong connection link power
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+    // Standard "Just Works" pairing with bonding enabled
+    NimBLEDevice::setSecurityAuth(true, false, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    // Pass wantDuplicates = true so controllers whose name arrives in Scan Response
+    // or reconnect advertisements are never dropped by the controller duplicate filter.
+    pScan->setAdvertisedDeviceCallbacks(&s_advCallbacks, true);
+    pScan->setActiveScan(true);
+    pScan->setInterval(80);
+    pScan->setWindow(40);
+    pScan->setMaxResults(0); // Do not store scan results in RAM vector (prevents heap leak)
+
+    ble_gamepad_start_scan();
+
+    // Run BLE connection & GATT write worker on Core 0 so Core 1 USB HID is never blocked
+    xTaskCreatePinnedToCore(
+        bleWorkerTask,
+        "ble_worker",
+        4096,
+        nullptr,
+        2,
+        &s_bleWorkerTaskHandle,
+        0
+    );
 }
 
 void ble_gamepad_loop() {
-    if (s_doConnect) {
-        s_doConnect = false;
-        connectToTarget(s_targetAddress, s_targetName);
-    }
-
-    // Safely process rumble in main loop context (outside USB ISR)
-    processPendingRumble();
-
-    // Auto-restart scan if disconnected, not connecting, and timeout elapsed
-    if (!s_connected && !s_doConnect) {
-        NimBLEScan* pScan = NimBLEDevice::getScan();
-        if (pScan && !pScan->isScanning() && millis() > s_lastScanStart) {
-            ble_gamepad_start_scan();
-        }
-    }
+    // Background worker task handles connection and GATT writes asynchronously.
 }
 
 bool ble_gamepad_is_connected() {
     return s_connected;
 }
 
+BleGamepadTelemetry ble_gamepad_get_telemetry() {
+    BleGamepadTelemetry t;
+    memset(&t, 0, sizeof(t));
+    t.connected = s_connected;
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    t.scanning = (!s_connected && pScan && pScan->isScanning());
+    t.hasRumble = (s_connected && s_pRumbleChar != nullptr);
+    t.rssi = s_lastRssi;
+    t.packetsReceived = s_packetCount;
+    t.lastPacketAgeMs = (s_lastPacketMs > 0) ? (millis() - s_lastPacketMs) : 0;
+    strncpy(t.deviceName, s_targetName.c_str(), sizeof(t.deviceName) - 1);
+    std::string macStr = s_targetAddress.toString();
+    strncpy(t.deviceMac, macStr.c_str(), sizeof(t.deviceMac) - 1);
+    return t;
+}
+
 void ble_gamepad_print_status() {
+    BleGamepadTelemetry t = ble_gamepad_get_telemetry();
     Serial.println("--- BLE Gamepad Status ---");
-    Serial.printf("Connected: %s\n", s_connected ? "YES" : "NO");
-    if (s_connected) {
-        Serial.printf("Device:    %s (%s)\n", s_targetName.c_str(), s_targetAddress.toString().c_str());
+    Serial.printf("Connected: %s\n", t.connected ? "YES" : "NO");
+    if (t.connected) {
+        Serial.printf("Device:    %s (%s)\n", t.deviceName, t.deviceMac);
+        Serial.printf("RSSI:      %d dBm\n", t.rssi);
+        Serial.printf("Rumble:    %s\n", t.hasRumble ? "ACTIVE" : "NONE");
+        Serial.printf("Packets:   %u (last %lu ms ago)\n", t.packetsReceived, t.lastPacketAgeMs);
     } else {
-        NimBLEScan* pScan = NimBLEDevice::getScan();
-        Serial.printf("Scanning:  %s\n", (pScan && pScan->isScanning()) ? "ACTIVE" : "IDLE");
+        Serial.printf("Scanning:  %s\n", t.scanning ? "ACTIVE" : "IDLE");
     }
     Serial.println("--------------------------");
 }

@@ -1,47 +1,56 @@
-# ESP32-S3 DualShock 3 Emulator & Wireless BLE Controller Bridge
+# PAD2PS3
 
-A high-performance, low-latency firmware for the **ESP32-S3** microcontroller that emulates an authentic **Sony PlayStation 3 DualShock 3** controller over native USB OTG while connecting wirelessly to Bluetooth Low Energy gamepads—specifically tailored for the **Google Stadia Controller** (Bluetooth Mode).
+ESP32-S3 firmware that emulates a Sony PlayStation 3 DualShock 3 over USB while bridging wireless BLE gamepads, such as the Google Stadia controller.
 
-Turn your Google Stadia controller (or other BLE gamepads) into a native, fully functional PS3 controller with full button mapping, smooth analog sticks, analog triggers, interactive Serial CLI, and **bidirectional rumble/haptic feedback**.
+[![Platform](https://img.shields.io/badge/platform-ESP32--S3-000000?style=flat-square&labelColor=1f1f1f)](#hardware-setup)
+[![Stack](https://img.shields.io/badge/stack-PlatformIO%20%C2%B7%20C%2B%2B-000000?style=flat-square&labelColor=1f1f1f)](#build-and-flash)
 
----
+PAD2PS3 v2.0 (ESP32-S3 DualShock 3 Emulator and Wireless BLE Controller Bridge) is a high-performance, low-latency
+firmware for the **ESP32-S3** microcontroller. It emulates an authentic **Sony PlayStation 3 DualShock 3** controller
+over native USB OTG while connecting wirelessly to Bluetooth Low Energy gamepads. It is tailored for the
+**Google Stadia Controller** (Bluetooth mode) and works with other BLE HID gamepads.
+
+It turns your Google Stadia controller (or other BLE gamepads) into a native, fully functional PS3 controller with
+customizable **2D radial analog stick curves**, **trigger activation curves**, **full button remapping**,
+a **WiFi hotspot with an interactive Web UI**, **NVS flash persistence**, an interactive Serial CLI, and
+**bidirectional rumble/haptic feedback**.
 
 ## Features
 
-- **Authentic Sony DualShock 3 USB Emulation**:
+- **Authentic Sony DualShock 3 USB emulation:**
   - Emulates an authentic Sony DualShock 3 (`054C:0268`) on the ESP32-S3 native USB OTG peripheral (GPIO 19 `D-` / GPIO 20 `D+`).
-  - Implements genuine PS3 console handshake: responds to proprietary Feature Reports (`0x01`, `0xF2`, `0xF5`, `0xEF`, `0xF8`, `0xF7`, and `0xF4` streaming activation).
-  - Automatically pulses the PS button upon handshake completion to assign controller player number (`Player 1..4` LED detection).
-  - Streams standard 48-byte native DualShock 3 reports at **100Hz (10ms)**.
-
-- **Wireless BLE Gamepad Host (Google Stadia Controller)**:
+  - Implements the genuine PS3 console handshake: responds to proprietary Feature Reports (`0x01`, `0xF2`, `0xF5`, `0xEF`, `0xF8`, `0xF7`, and `0xF4` streaming activation).
+  - Automatically pulses the PS button when the handshake completes (and across PS3 game launches/mode transitions) to assign the controller player number (`Player 1..4` LED detection).
+  - Streams standard 48-byte native DualShock 3 reports at **100Hz (10ms)** directly via TinyUSB hardware endpoints without blocking semaphore deadlocks.
+- **WiFi hotspot and live web configuration UI:**
+  - Hosts a built-in WiFi SoftAP (`PAD2PS3-Config`, default password `ps3controller`, IP `http://192.168.4.1`) with captive portal support.
+  - Runs asynchronously on **Core 0** with hardware Bluetooth RF coexistence priority (`ESP_COEX_PREFER_BT`), so controller polling on **Core 1** keeps zero jitter.
+  - **Real-time telemetry dashboard:**
+    - Live 2D radar visualizers showing both **Raw Input** and **Curved PS3 Output** stick positions.
+    - Live L2/R2 trigger progress bars with digital actuation indicators and real-time button press highlights.
+  - **2D radial analog stick activation curves** (independent left and right stick tuning):
+    - Presets: **Linear**, **Exponential (Fine Aim Precision)**, **S-Curve (Smooth Center & Edge)**, **Aggressive (Quick Ramp)**, and **Custom Power Exponent**.
+    - Configurable Inner Deadzone (`0–40%`), Outer Saturation (`0–25%`), Sensitivity (`50–150%`), X/Y Axis Inversion, and Left/Right Stick Swap.
+  - **Trigger activation curves (L2 and R2):**
+    - Presets: **Linear**, **Soft / Racing**, **S-Curve**, **Hair Trigger / Shooter**, and **Custom**.
+    - Adjustable Min Deadzone, Max Saturation, Digital Click Threshold (`1–255`), and L2/R2 Swap.
+  - **Full button remapping and D-pad modes:**
+    - Remap any physical button (including the Stadia **Assistant** and **Capture** buttons) to any PS3 button, or apply one-click presets (**Default**, **Nintendo Swap**, **PS3 Tactical Shooter L1↔L2 / R1↔R2**).
+    - Configurable D-pad mode: **Standard D-Pad**, **D-Pad Emulates Left Analog Stick**, or **Both**.
+  - **Persistent NVS storage and JSON profiles:**
+    - Save configurations permanently to ESP32 NVS flash, export/import `.json` profiles, or restore factory defaults with one click.
+- **Wireless BLE gamepad host (Google Stadia and BLE controllers):**
   - Scans, connects, and bonds automatically to BLE HID gamepads using NimBLE.
-  - Tailored mapping for Google Stadia Bluetooth mode:
-    - **D-Pad**: 8-direction Hat Switch (Up, Down, Left, Right, Diagonals)
-    - **Action Buttons**: $\text{A} \rightarrow \text{Cross}$, $\text{B} \rightarrow \text{Circle}$, $\text{X} \rightarrow \text{Square}$, $\text{Y} \rightarrow \text{Triangle}$
-    - **Bumpers & Clicks**: L1, R1 bumpers; L3, R3 analog stick clicks
-    - **Triggers**: Smooth analog L2 and R2 (`0..255`) plus digital click thresholds
-    - **System Buttons**: Options ($\dots$) $\rightarrow$ Select, Menu ($\equiv$) $\rightarrow$ Start, Stadia Logo $\rightarrow$ PS / Home button, Assistant & Capture buttons
+  - A dedicated background FreeRTOS worker task on Core 0 handles the BLE connection, fast reconnection, and GATT writes without ever blocking USB HID report streaming.
+- **Bidirectional rumble / haptic feedback:**
+  - Intercepts PS3 host Output Report `0x01` motor commands and durations in real time, with an automatic motor expiration watchdog.
+  - Independent scaling for Master Intensity (`0–100%`), Left Heavy Motor (`0–100%`), and Right Light Motor (`0–100%`).
 
-- **Bidirectional Rumble / Haptic Feedback**:
-  - Intercepts PS3 host Output Report `0x01` motor commands in real time.
-  - Maps PS3 dual motors (low-frequency heavy motor and high-frequency light buzz) to Stadia 16-bit PID Haptic Output Reports (Report ID 5).
-  - **Calibrated Vibration Profile**: Small motor is scaled to a realistic duty cycle (~36%) instead of violent 100% saturation.
-  - **Live Intensity Control**: Master rumble strength is adjustable on the fly via serial CLI (`intensity <0-100>`), defaulting to a comfortable 60%.
+## Requirements
 
-- **Interactive Serial CLI**:
-  - Operates over the board's hardware UART port at **115200 baud** without interfering with USB OTG.
-  - Allows manual button triggering, axis positioning, live input logging (`log`), rumble testing (`rumble`), intensity adjustment (`intensity`), and BLE status checks (`ble`, `scan`).
+### Hardware setup
 
-- **Zero-Latency Design**:
-  - Verbose library logging compiled out for maximum throughput.
-  - Rate-limited, non-blocking rumble writes to preserve tight 100Hz controller polling rates without USB bus drops.
-
----
-
-## Hardware Setup
-
-```
+```text
  +-----------------------------------+
  |         ESP32-S3 DevKitC-1        |
  |                                   |
@@ -57,14 +66,12 @@ Turn your Google Stadia controller (or other BLE gamepads) into a native, fully 
 
 > [!IMPORTANT]
 > The ESP32-S3 DevKitC-1 has **two Type-C USB ports**:
-> 1. **`USB` / `OTG` Port**: Connects directly to the **PlayStation 3** console (or PC).
-> 2. **`UART` Port**: Connects to your computer for PlatformIO flashing and the interactive Serial CLI monitor.
+> 1. **`USB` / `OTG` port:** connects directly to the **PlayStation 3** console (or PC).
+> 2. **`UART` port:** connects to your computer for PlatformIO flashing and the interactive Serial CLI monitor.
 
----
+## Install
 
-## Quick Start
-
-### 1. Build and Flash Firmware
+### Build and flash
 
 Connect your PC to the ESP32-S3 **`UART`** port:
 
@@ -79,99 +86,73 @@ pio run -t upload
 pio device monitor
 ```
 
-### 2. Put Google Stadia Controller into Bluetooth Mode
+### Connect to the Web UI (WiFi hotspot)
 
-If you haven't already unlocked Bluetooth on your Stadia controller, visit [Google Stadia Bluetooth Unlock](https://stadia.google.com/controller/) using Chrome.
+1. On your phone or PC, connect to the WiFi network:
+   - **SSID:** `PAD2PS3-Config`
+   - **Password:** `ps3controller`
+2. Open your browser to **`http://192.168.4.1`** (or use the automatic captive portal popup).
+3. Customize analog stick curves, trigger curves, deadzones, button mappings and rumble strength in real time, then click **Save to Flash (NVS)**.
 
-1. Ensure the controller is powered off.
-2. Hold the **Stadia button** and **`Y`** together for 3 seconds until the status LED pulses **orange**.
-3. The ESP32-S3 will automatically detect `Stadia...`, pair, bond, and subscribe to input reports.
-4. The controller's LED will turn **solid white** once paired.
+### Pair your wireless BLE controller
 
-### 3. Connect to the PS3 Console
+1. Put your Google Stadia controller into pairing mode by holding the **Stadia button** + **`Y`** for 3 seconds until the LED flashes **orange**.
+2. The ESP32-S3 detects, pairs, bonds and subscribes to input reports automatically.
 
-1. Connect the ESP32-S3 **`USB` (OTG)** port to the front USB port of your PS3 using a high-quality data USB cable.
-2. The ESP32-S3 will perform the authentic Sony handshake, send the PS button pulse, and pair with the console.
-3. The PS3 will assign Player 1 (or next available slot), and the Stadia controller will immediately control the PS3 console!
+### Connect to the PS3 console
 
----
+1. Connect the ESP32-S3 **`USB` (OTG)** port to the PS3 console.
+2. The ESP32-S3 performs the authentic Sony handshake, pulses the PS button, and assigns `Player 1..4`.
 
-## Interactive Serial CLI Reference
+## Usage
 
-You can send commands directly to the ESP32-S3 over the serial monitor (`115200` baud, newline terminated):
+### Serial CLI reference
+
+Send commands over the hardware UART serial monitor (`115200` baud, newline terminated):
 
 | Command | Description |
-|---|---|
-| `help` / `?` | Print list of all available commands |
-| `status` | Print current controller input state (buttons, axes, d-pad) |
+| :-- | :-- |
+| `help` / `?` | Print the list of all available commands |
+| `status` | Print the current controller input state (buttons, axes, d-pad) |
+| `wifi` | Print the WiFi hotspot SSID, IP URL, and connected client count |
+| `config` | Print the active JSON configuration |
+| `resetcfg` | Restore factory default settings and save to NVS |
 | `log` / `debug` | Toggle live real-time input logging on/off |
-| `intensity <0-100>` | Set master rumble intensity percentage (e.g. `intensity 60`) |
-| `intensity` | Print current master rumble intensity percentage |
+| `intensity <0-100>` | Set the master rumble intensity percentage and save to NVS |
 | `rumble [0-255]` | Trigger a 500ms test rumble pulse on the connected gamepad |
-| `ble` | Print current Bluetooth / BLE connection status and peer MAC |
-| `scan` | Force restart BLE scan for nearby gamepads |
-| `x` / `cross` | Tap Cross button |
-| `o` / `circle` | Tap Circle button |
-| `s` / `square` | Tap Square button |
-| `t` / `triangle` | Tap Triangle button |
+| `ble` | Print the current Bluetooth / BLE connection status, RSSI, and packet count |
+| `scan` | Force disconnect and restart the BLE scan for nearby gamepads |
+| `x`, `o`, `s`, `t` | Tap Cross, Circle, Square, or Triangle |
 | `u`, `d`, `l`, `r` | Tap D-Pad Up, Down, Left, or Right |
-| `l1`, `r1` | Tap L1 or R1 bumper |
-| `l2`, `r2` | Tap L2 or R2 trigger |
-| `l3`, `r3` | Tap L3 or R3 stick click |
-| `start`, `select` | Tap Start or Select button |
-| `ps` | Pulse PS (Home) button for 200ms |
-| `pshold` | Hold down PS button |
-| `psrel` | Release PS button |
-| `lx <0-255>` | Manually set Left Stick X axis (128 = center) |
-| `ly <0-255>` | Manually set Left Stick Y axis (128 = center) |
-| `rx <0-255>` | Manually set Right Stick X axis (128 = center) |
-| `ry <0-255>` | Manually set Right Stick Y axis (128 = center) |
-| `center` / `neutral` | Reset all buttons, triggers, and axes to neutral |
-| `demo` | Toggle automated 10-second test loop on/off |
+| `l1`, `r1`, `l2`, `r2`, `l3`, `r3` | Tap shoulder/trigger/stick click buttons |
+| `start`, `select` | Tap Start or Select |
+| `ps`, `pshold`, `psrel` | Pulse, hold, or release the PS (Home) button |
+| `lx`, `ly`, `rx`, `ry <0-255>` | Manually set an analog stick axis position (128 = center) |
+| `center` / `reset` | Reset all buttons, triggers, and axes to neutral |
+| `demo` | Toggle an automated 10-second test loop on/off |
 
----
+## Project structure
 
-## Project Structure
-
-```
-PS3CTRL/
-├── platformio.ini          # PlatformIO board, clock, and build flags
+```text
+PAD2PS3/
+├── platformio.ini          # PlatformIO board, partition table (huge_app.csv), and build flags
 ├── CMakeLists.txt          # IDE integration configuration
 ├── README.md               # Project documentation
 └── src/
     ├── main.cpp            # Setup, USB connection lifecycle, Serial CLI
-    ├── ble_gamepad.h       # BLE client interface, rumble intensity declarations
-    ├── ble_gamepad.cpp     # NimBLE host, Stadia mapping, haptic translation
+    ├── config_manager.h    # Stick/trigger curve structs, button mapping, NVS & JSON API
+    ├── config_manager.cpp  # 2D radial curve math, NVS flash storage, JSON parser/serializer
+    ├── web_server.h        # WiFi SoftAP hotspot and HTTP/DNS server interface
+    ├── web_server.cpp      # Core 0 web server, REST endpoints, Bluetooth RF coexistence
+    ├── web_ui.h            # Embedded responsive Web UI (HTML5 Canvas curve editor & telemetry)
+    ├── ble_gamepad.h       # BLE client interface, telemetry & rumble declarations
+    ├── ble_gamepad.cpp     # NimBLE host, Core 0 worker task, fast reconnect, rumble watchdog
     ├── usb_hid.h           # DualShock 3 descriptors, handshake structures, API
-    ├── usb_hid.cpp         # TinyUSB stack implementation, authentic PS3 responses
-    ├── controller_state.h  # State storage definitions and button constants
-    └── controller_state.cpp # Active controller state buffer and report compiler
+    ├── usb_hid.cpp         # Direct TinyUSB hardware endpoint streaming & PS3 handshakes
+    ├── controller_state.h  # Raw & processed state definitions and button constants
+    └── controller_state.cpp # Thread-safe state pipeline, remapping, and report compiler
 ```
-
----
-
-## Technical Details
-
-### PS3 USB Handshake Sequence
-Authentic PS3 consoles require a specific USB feature exchange before accepting controller inputs:
-1. `GET_REPORT (Feature 0x01)`: Controller capabilities.
-2. `GET_REPORT (Feature 0xF2)`: DualShock 3 Bluetooth MAC address inquiry.
-3. `GET_REPORT / SET_REPORT (Feature 0xF5)`: PS3 Host Bluetooth MAC exchange.
-4. `SET_REPORT (Feature 0xEF)`: Encryption/subcmd handshake (`0xA0` and `0xB0`).
-5. `GET_REPORT (Feature 0xF8)` and `(Feature 0xF7)`: Final handshake verification.
-6. **PS Button Pulse**: Firmware pulses the PS button to register player assignment.
-7. `SET_REPORT (Feature 0xF4)`: PS3 activates streaming (`0x42 0x0C`) and assigns Player LED.
-
-### Rumble / Haptic Mapping
-- **PS3 DualShock 3 Output Report `0x01`**:
-  - `buffer[1..2]`: Right motor duration and power (binary high-frequency motor).
-  - `buffer[3..4]`: Left motor duration and power (analog low-frequency motor, 0..255).
-- **Google Stadia PID Output Report `0x05`**:
-  - Stadia expects 4 bytes: `[left_lo, left_hi, right_lo, right_hi]` in 16-bit range (`0..65534`).
-  - The firmware translates the PS3 command into appropriate 16-bit actuator values and applies master intensity scaling with a 40ms rate limit to prevent BLE buffer congestion.
-
----
 
 ## License
 
-This project is open-source and intended for personal and educational use. PlayStation and DualShock are trademarks of Sony Interactive Entertainment Inc. Google Stadia is a trademark of Google LLC. This project is not affiliated with or endorsed by Sony or Google.
+No license has been chosen yet.
